@@ -1,0 +1,38 @@
+log_format = "text"
+local = false
+
+[smtp]
+listen_addr = ":25"
+domain = "mail.example.com"
+max_message_size = 10485760
+timeout_duration = "10s"
+min_tls_version = "1.2"
+
+[s3]
+endpoint = "s3.amazonaws.com"
+bucket = "email-mx-certs"
+prefix = "certs/"
+access_key_id = "your-s3-access-key-id"
+secret_access_key = "your-s3-secret-access-key"
+region = "us-east-1"
+
+[destination]
+url = "https://your-worker.example.com/email"
+api_key = "your-api-key-here"
+max_retry_attempts = 3
+
+[domains]
+url = "https://your-r2-bucket.r2.dev/valid-domains.json"  # URL or local file path to valid domains list
+api_key = "your-domains-api-key"  # Optional API key for authentication
+
+[blacklists]
+enabled = true  # Enable DNS blacklist checking
+lists = ["zen.spamhaus.org"]  # DNS blacklist servers to check
+timeout = "3s"  # Timeout for blacklist queries
+check_helo_resolves = false  # Whether to verify HELO hostname resolves
+
+[tls]
+email = "admin@example.com"
+use_production = true
+use_local_ca = false
+certmagic_verbose = false

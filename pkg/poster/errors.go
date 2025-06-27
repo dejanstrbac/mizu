@@ -1,0 +1,44 @@
+package poster
+
+import (
+	"errors"
+	"fmt"
+)
+
+// Error types for HTTP posting
+var (
+	// Network errors (retryable)
+	ErrConnectionRefused = errors.New("connection refused")
+	ErrConnectionReset   = errors.New("connection reset")
+	ErrTimeout           = errors.New("timeout")
+	ErrNoSuchHost        = errors.New("no such host")
+	ErrTemporaryFailure  = errors.New("temporary failure")
+
+	// Context errors (non-retryable)
+	ErrContextCancelled = errors.New("context cancelled")
+	ErrContextTimeout   = errors.New("context deadline exceeded")
+)
+
+// HTTPStatusError represents an HTTP response error with status code
+type HTTPStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("URL returned non-success status: %d, body: %s", e.StatusCode, e.Body)
+}
+
+// IsRetryable returns true if the status code indicates a retryable error
+func (e *HTTPStatusError) IsRetryable() bool {
+	// 5xx server errors are retryable
+	return e.StatusCode >= 500 && e.StatusCode < 600
+}
+
+// NewHTTPStatusError creates a new HTTPStatusError
+func NewHTTPStatusError(statusCode int, body string) *HTTPStatusError {
+	return &HTTPStatusError{
+		StatusCode: statusCode,
+		Body:       body,
+	}
+}
