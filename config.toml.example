@@ -1,29 +1,67 @@
 log_format = "text"
 local = false
 
+# DNS resolver configuration (applies to all DNS operations: rDNS, MX, DMARC, blacklists, etc.)
+[dns]
+servers = ["1.1.1.1:53", "1.0.0.1:53"]  # Custom DNS servers (Cloudflare DNS), empty = use system default
+timeout = "5s"                           # DNS query timeout (default: 5s)
+
+# Global cluster configuration for multi-server deployments
+[cluster]
+enabled = false              # Enable cluster mode for distributed features
+hostname = ""                # This server's hostname (auto-detected if empty)
+peer_port = ":8080"          # Port for peer-to-peer communication (health check port)
+peers = [                    # List of peer hostnames (without port, uses peer_port for all)
+  # "smtp-server-2.example.com",
+  # "smtp-server-3.example.com"
+]
+
 [smtp]
 listen_addr = ":25"
-domain = "mail.example.com"
+domain = "gomailify.com"
 max_message_size = 10485760
 timeout_duration = "10s"
 min_tls_version = "1.2"
+require_sender_mx = true     # Require sender domain to have MX records (anti-spam, default: true)
+max_connections = 100        # Maximum total concurrent connections (0 = unlimited)
+max_connections_per_ip = 10  # Maximum concurrent connections per IP (0 = unlimited)
+
+[smtp.rate_limit]
+enabled = true                      # Enable rate limiting (prevents rapid connection attempts)
+connections_per_minute = 60         # Max connections per IP per minute (0 = unlimited)
+window_size = "1m"                  # Sliding window size for rate limiting
+gossip_enabled = false              # Share rate limit state across cluster (requires cluster.enabled=true)
+gossip_interval = "5s"              # How often to gossip rate limit data to peers
+
+[smtp.distributed]
+# Distributed connection tracking uses cluster.peers and cluster.peer_port for coordination
+enabled = false              # Enable distributed connection tracking (requires cluster.enabled=true)
+global_max_per_ip = 0        # Global max connections per IP across cluster (0 = use local limit only)
+gossip_interval = "5s"       # How often to broadcast connection state to peers (P2P gossip)
+s3_sync_interval = "30s"     # How often to sync connection state via S3 (fallback/persistence)
+recipient_cache_ttl = "15m"  # How long to cache recipient validation results (404/403 responses)
 
 [s3]
 endpoint = "s3.amazonaws.com"
 bucket = "email-mx-certs"
 prefix = "certs/"
-access_key_id = "your-s3-access-key-id"
-secret_access_key = "your-s3-secret-access-key"
+access_key_id = "1your-s3-access-key-id"
+secret_access_key = "1your-s3-secret-access-key"
 region = "us-east-1"
 
 [destination]
 url = "https://your-worker.example.com/email"
-api_key = "your-api-key-here"
-max_retry_attempts = 3
+api_key = "123123131231"
+max_retry_attempts = 3  # Retries with 1s, 2s, 4s exponential backoff
+http_timeout = "30s"    # HTTP client timeout for posting emails to destination
 
-[domains]
-url = "https://your-r2-bucket.r2.dev/valid-domains.json"  # URL or local file path to valid domains list
-api_key = "your-domains-api-key"  # Optional API key for authentication
+[destination.circuit_breaker]
+enabled = true
+failure_threshold = 5      # Number of consecutive failures before opening circuit
+success_threshold = 2      # Number of successes in half-open state to close circuit
+timeout = "30s"            # Time to wait in open state before trying half-open
+half_open_max_calls = 1    # Max concurrent requests allowed in half-open state
+reset_timeout = "60s"      # Time before resetting failure counters in closed state
 
 [blacklists]
 enabled = true  # Enable DNS blacklist checking
@@ -32,7 +70,22 @@ timeout = "3s"  # Timeout for blacklist queries
 check_helo_resolves = false  # Whether to verify HELO hostname resolves
 
 [tls]
-email = "admin@example.com"
+email = "me@example.com"
 use_production = true
 use_local_ca = false
 certmagic_verbose = false
+
+[health]
+enabled = true
+listen_addr = ":8080"
+username = "admin"       # HTTP Basic Auth username (empty = no auth)
+password = "changeme"    # HTTP Basic Auth password
+
+[stats]
+# Stats sync uses cluster.peers, cluster.peer_port, and cluster.hostname for coordination
+enabled = true  # Enable IP and domain reputation tracking
+retention_duration = "24h"  # How long to keep stats in memory
+sync_enabled = true  # Enable distributed stats sync (uses cluster.peers)
+sync_interval = "1m"  # How often to sync/export stats
+max_ip_entries = 100000  # Maximum IP entries to track (0 = unlimited, default: 100000)
+max_domain_entries = 50000  # Maximum domain entries to track (0 = unlimited, default: 50000)

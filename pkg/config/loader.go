@@ -25,6 +25,8 @@ func LoadConfig(args []string) (*Config, error) {
 	fs.StringVar(&cfg.SMTP.Domain, "smtp.domain", cfg.SMTP.Domain, "SMTP domain")
 	fs.IntVar(&cfg.SMTP.MaxMessageSize, "smtp.max-message-size", cfg.SMTP.MaxMessageSize, "Maximum message size in bytes")
 	fs.DurationVar(&cfg.SMTP.TimeoutDuration, "smtp.timeout", cfg.SMTP.TimeoutDuration, "SMTP timeout duration")
+	fs.BoolVar(&cfg.SMTP.CheckXSpamFlag, "smtp.check-x-spam-flag", cfg.SMTP.CheckXSpamFlag, "Enable check for X-Spam-Flag header")
+	fs.BoolVar(&cfg.SMTP.DMARCQuarantineAsJunk, "smtp.dmarc-quarantine-as-junk", cfg.SMTP.DMARCQuarantineAsJunk, "Treat DMARC quarantine policy as junk")
 
 	// S3 flags
 	fs.StringVar(&cfg.S3.Endpoint, "s3.endpoint", cfg.S3.Endpoint, "S3 endpoint")
@@ -34,13 +36,13 @@ func LoadConfig(args []string) (*Config, error) {
 	fs.StringVar(&cfg.S3.AccessKeyID, "s3.access-key-id", cfg.S3.AccessKeyID, "S3 access key ID (prefer env var for security)")
 	fs.StringVar(&cfg.S3.SecretAccessKey, "s3.secret-access-key", cfg.S3.SecretAccessKey, "S3 secret access key (prefer env var for security)")
 
-	// Domains flags
-	fs.StringVar(&cfg.Domains.URL, "domains.url", cfg.Domains.URL, "URL or file path to fetch valid domains list (JSON array)")
-	fs.StringVar(&cfg.Domains.APIKey, "domains.api-key", cfg.Domains.APIKey, "API key for domains endpoint (optional)")
-
 	// Destination flags
 	fs.StringVar(&cfg.Destination.URL, "destination.url", cfg.Destination.URL, "Destination URL")
 	fs.StringVar(&cfg.Destination.APIKey, "destination.api-key", cfg.Destination.APIKey, "Destination API key, given in X-API-Key")
+
+	// Health check flags
+	fs.BoolVar(&cfg.Health.Enabled, "health.enabled", cfg.Health.Enabled, "Enable health check HTTP endpoint")
+	fs.StringVar(&cfg.Health.ListenAddr, "health.listen-addr", cfg.Health.ListenAddr, "Health check listen address")
 
 	// TLS flags
 	fs.StringVar(&cfg.TLS.Email, "tls.email", cfg.TLS.Email, "Email for Let's Encrypt")
@@ -63,7 +65,7 @@ func LoadConfig(args []string) (*Config, error) {
 	}
 
 	if *help {
-		fmt.Println("SMTP Relay Server")
+		fmt.Println("Mizu SMTP Relay Server")
 		fmt.Println()
 		fs.PrintDefaults()
 		os.Exit(0)
@@ -123,14 +125,6 @@ func loadEnvVars(cfg *Config) {
 		cfg.S3.Endpoint = v
 	}
 
-	// Domains configuration
-	if v := os.Getenv("VALID_DOMAINS_URL"); v != "" {
-		cfg.Domains.URL = v
-	}
-	if v := os.Getenv("VALID_DOMAINS_API_KEY"); v != "" {
-		cfg.Domains.APIKey = v
-	}
-
 	// Destination credentials
 	if v := os.Getenv("DESTINATION_URL"); v != "" {
 		cfg.Destination.URL = v
@@ -150,7 +144,7 @@ func validateConfig(cfg *Config) error {
 		return nil
 	}
 
-	// In production mode, require a real domain
+	// In production mode, require a real domain (reject placeholder)
 	if cfg.SMTP.Domain == "" || cfg.SMTP.Domain == "mail.yourdomain.com" {
 		return fmt.Errorf("SMTP domain must be configured")
 	}
@@ -176,11 +170,6 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("destination API key must be configured (via config file, flag, or DESTINATION_API_KEY env var)")
 	}
 
-	// In production mode, domains URL is required
-	if cfg.Domains.URL == "" {
-		return fmt.Errorf("valid domains URL must be configured")
-	}
-
 	return nil
 }
 
@@ -193,8 +182,6 @@ func SaveExample(filename string) error {
 	cfg.Destination.APIKey = "your-api-key-here"
 	cfg.S3.AccessKeyID = "your-s3-access-key-id"
 	cfg.S3.SecretAccessKey = "your-s3-secret-access-key"
-	cfg.Domains.URL = "https://your-r2-bucket.r2.dev/valid-domains.json"
-	cfg.Domains.APIKey = "your-domains-api-key"
 
 	// Create directory if needed
 	dir := filepath.Dir(filename)

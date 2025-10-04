@@ -1,248 +1,430 @@
-# SMTP Relay Server
+# Mizu - High-Performance SMTP Relay Server
 
-A high-performance SMTP relay server that listens on port 25, accepts incoming emails, and forwards them via HTTP POST to a configured endpoint (e.g., Cloudflare Worker). The server supports STARTTLS with automatic certificate issuance and management using Let's Encrypt, with certificate storage and coordination via S3.
+**Mizu** (水 - Japanese for "water") is a production-ready SMTP relay server that accepts incoming emails and synchronously forwards them via HTTP POST to your backend endpoint. Designed for reliability and security, Mizu ensures **zero message loss** by only accepting messages after successful delivery confirmation.
 
-## Features
+[![Go](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://golang.org/)
+[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-- **SMTP Server**: Listens on port 25 for incoming email
-- **STARTTLS Support**: Automatic TLS certificate issuance via Let's Encrypt
-- **S3 Certificate Storage**: Distributed certificate management across multiple server instances
-- **Domain Validation**: Dynamic domain whitelist fetched from S3/R2 with automatic refresh
-- **HTTP Forwarding**: Converts SMTP messages to HTTP POST requests with retry support
-- **SPF Validation**: Basic SPF checking for incoming emails
-- **DMARC Validation**: Full DMARC policy enforcement with SPF and DKIM alignment
-- **DNS Blacklists**: Support for RBL/DNSBL checking (e.g., Spamhaus)
-- **Anti-Spam Features**: 
-  - Reverse DNS validation
-  - HELO hostname validation and resolution checking
-  - Null sender rejection
-  - Header validation (From, Date, Message-ID)
-  - Duplicate header detection
-  - Empty message rejection
-  - Junk message flagging in HTTP headers
-- **Modular Architecture**: Clean package structure for maintainability
+## 🎯 Core Design Principles
 
-## Package Structure
+1. **Zero Message Loss**: SMTP 250 OK is ONLY sent after HTTP 200/202 from destination
+2. **Synchronous Delivery**: No queues - messages delivered during SMTP session
+3. **Production Ready**: Comprehensive error handling, panic recovery, graceful shutdown
+4. **Distributed Architecture**: Built for multi-instance deployments from the ground up
+5. **Security First**: Mandatory TLS, comprehensive anti-spam validation, reputation tracking
+
+## ✨ Key Features
+
+### 🔒 Security & Anti-Spam
+
+- **Mandatory STARTTLS** with automatic Let's Encrypt certificates
+- **SPF & DMARC Validation** with alignment checking
+- **DKIM Validation** using emersion/go-msgauth
+- **DNS Blacklists** (RBL/DNSBL) support (Spamhaus, etc.)
+- **Reverse DNS Validation** with configurable timeout
+- **Sender MX Validation** - reject domains without MX records
+- **Header Validation** - From, Date, Message-ID required
+- **Null Sender Rejection** - blocks empty senders `<>`
+- **Custom DNS Resolvers** - use Cloudflare/Google DNS globally
+
+### 🛡️ DoS Protection & Rate Limiting
+
+- **Connection Limits** - Global and per-IP concurrent connection limits
+- **Rate Limiting** - Sliding window algorithm (connections/minute per IP)
+- **Distributed Rate Limiting** - Gossip protocol shares state across cluster
+- **Distributed Connection Tracking** - P2P gossip + S3 sync for cluster-wide limits
+- **Circuit Breaker Pattern** - Protects against destination failures with auto-recovery
+
+### 📊 Reputation & Intelligence
+
+- **Real-time Reputation Tracking** - IP and domain scoring
+- **Distributed Stats Sync** - Share reputation data across cluster via S3
+- **Automatic Blocking** - Bad actors blocked based on reputation
+- **Recipient Caching** - Cache 404/403 responses cluster-wide (15min TTL)
+- **LRU Eviction** - Memory-safe with configurable max entries
+- **DMARC Failure Tracking** - Identify spoofing attempts
+
+### 🔄 High Availability
+
+- **Distributed Deployment** - Multi-instance with peer-to-peer coordination
+- **Graceful Shutdown** - Waits for active sessions (configurable timeout)
+- **Health Monitoring** - HTTP health checks with component status
+- **S3 Certificate Storage** - Distributed cert management with locking
+- **Circuit Breaker** - Fail fast when destination is down (auto-recovery)
+- **Panic Recovery** - WaitGroup leak prevention with stack traces
+
+### 🔧 Operational Excellence
+
+- **Structured Logging** - JSON or text format with trace IDs
+- **Session Monitoring** - Real-time active session count tracking
+- **Admin CLI** - `mizu-admin` for health, stats, blocked IPs, cache flush
+- **HTTP Basic Auth** - Protect health/API endpoints
+- **Comprehensive Testing** - 100+ tests including integration & E2E
+
+## 🏗️ Architecture
 
 ```
-.
-├── main.go                 # Main application entry point
-├── pkg/
-│   ├── config/            # Configuration constants
-│   │   └── config.go
-│   ├── smtp/              # SMTP server implementation
-│   │   └── server.go
-│   ├── storage/           # S3 certificate storage
-│   │   └── s3.go
-│   └── poster/            # HTTP destination communication
-│       └── poster.go
-├── go.mod
-├── go.sum
-└── README.md
+┌─────────────┐
+│   Internet  │
+└──────┬──────┘
+       │ SMTP (port 25)
+       │ STARTTLS
+       ▼
+┌─────────────────────────────────────────┐
+│         Mizu SMTP Relay Cluster         │
+│                                         │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐ │
+│  │ Mizu #1 │  │ Mizu #2 │  │ Mizu #3 │ │
+│  └─────────┘  └─────────┘  └─────────┘ │
+│       │            │            │       │
+│       └────────────┼────────────┘       │
+│              P2P Gossip                 │
+│         (connections, rate limits)      │
+└─────────────────┬───────────────────────┘
+                  │
+        ┌─────────┴─────────┐
+        │                   │
+        ▼                   ▼
+   ┌─────────┐         ┌─────────┐
+   │   S3    │         │  HTTP   │
+   │  Certs  │         │ Backend │
+   │  Stats  │         │Endpoint │
+   └─────────┘         └─────────┘
 ```
 
-### Package Descriptions
+### Message Flow
 
-- **`pkg/config`**: Contains all configuration constants including SMTP settings, S3 configuration, and domain settings
-- **`pkg/smtp`**: Implements the SMTP server backend and session handling, including anti-spam validations
-- **`pkg/storage`**: Provides S3-compatible certificate storage for certmagic with distributed locking
-- **`pkg/poster`**: Handles HTTP communication with retry support to the configured endpoint
-- **`pkg/domains`**: Manages domain validation with dynamic whitelist fetching and caching
-- **`pkg/validation`**: Implements DMARC, SPF, and DKIM validation for incoming emails
-- **`pkg/blacklist`**: Provides DNS blacklist (RBL/DNSBL) checking functionality
+1. **SMTP Reception** → Accept connection, check rate limits
+2. **Security Validation** → rDNS, blacklists, SPF, DMARC
+3. **Content Validation** → Headers, size, duplicate detection
+4. **Synchronous Delivery** → HTTP POST to destination (with retries)
+5. **SMTP Response** → 250 OK **only if** HTTP 200/202
+6. **Stats Recording** → Update reputation, sync to cluster
 
-## Configuration
+## 📦 Quick Start
 
-The server supports multiple configuration methods with the following precedence (highest to lowest):
-1. Command line flags
-2. Configuration file (TOML)
-3. Environment variables
-4. Default values
-
-### Configuration File
-
-Create a `config.toml` file (or use `./smtp-relay generate-config` to create an example):
-
-```toml
-log_format = "text"  # or "json"
-local = false
-
-[smtp]
-listen_addr = ":25"
-domain = "mail.example.com"
-max_message_size = 10485760  # 10MB
-timeout_duration = "10s"
-min_tls_version = "1.2"  # Minimum TLS version (1.2 or 1.3)
-
-[s3]
-endpoint = "s3.amazonaws.com"
-bucket = "email-mx-certs"
-prefix = "certs/"
-access_key_id = "your-s3-access-key-id"
-secret_access_key = "your-s3-secret-access-key"
-region = "us-east-1"
-
-[destination]
-url = "https://your-worker.example.com/email"
-api_key = "your-api-key-here"
-max_retry_attempts = 3  # Number of retry attempts before giving up
-
-[domains]
-url = "https://your-bucket.r2.dev/valid-domains.json"  # URL or local file path
-api_key = "your-domains-api-key"  # Optional API key for authentication
-
-[blacklists]
-enabled = true  # Enable DNS blacklist checking
-lists = ["zen.spamhaus.org"]  # DNS blacklist servers to check
-timeout = "3s"  # Timeout for blacklist queries
-check_helo_resolves = false  # Whether to verify HELO hostname resolves
-
-[tls]
-email = "admin@example.com"  # For Let's Encrypt
-use_production = true        # Use Let's Encrypt production (vs staging)
-use_local_ca = false        # Use local CA for testing
-certmagic_verbose = false   # Enable verbose certmagic logging
-```
-
-### Command Line Flags
+### Installation
 
 ```bash
-# Show all available flags
-./smtp-relay --help
+# Clone the repository
+git clone https://github.com/yourusername/mizu.git
+cd mizu
 
-# Example with flags
-./smtp-relay --smtp.domain=mail.mydomain.com \
-             --destination.url=https://my-worker.com/email \
-             --tls.email=admin@mydomain.com \
-             --log-format=json
+# Build
+go build -o mizu ./cmd/mizu
 
-# Local development mode
-./smtp-relay --local --smtp.domain=test.local
+# Generate example config
+./mizu generate-config > config.toml
+
+# Edit config.toml with your settings
+nano config.toml
+```
+
+### Minimal Configuration
+
+```toml
+[smtp]
+domain = "mail.example.com"
+
+[destination]
+url = "https://your-backend.example.com/email"
+api_key = "your-api-key"
+
+[tls]
+email = "admin@example.com"
+
+[s3]
+bucket = "your-s3-bucket"
+access_key_id = "YOUR_KEY"      # Or use env: S3_ACCESS_KEY_ID
+secret_access_key = "YOUR_SECRET"  # Or use env: S3_SECRET_ACCESS_KEY
+```
+
+### Run
+
+```bash
+# Production mode
+./mizu
+
+# Local development mode (no TLS, dumps to terminal)
+./mizu --local
+
+# With custom config
+./mizu --config /path/to/config.toml
+```
+
+## 📋 Configuration Reference
+
+### Complete Example
+
+See [config.toml.example](config.toml.example) for a fully documented configuration file.
+
+### Key Sections
+
+#### DNS Configuration (Global)
+```toml
+[dns]
+servers = ["1.1.1.1:53", "1.0.0.1:53"]  # Cloudflare DNS
+timeout = "5s"
+```
+
+#### Cluster Configuration
+```toml
+[cluster]
+enabled = true
+hostname = "smtp-1.example.com"
+peer_port = ":8080"
+peers = ["smtp-2.example.com", "smtp-3.example.com"]
+```
+
+#### Rate Limiting
+```toml
+[smtp.rate_limit]
+enabled = true
+connections_per_minute = 60
+window_size = "1m"
+gossip_enabled = true  # Share state with cluster
+gossip_interval = "5s"
+```
+
+#### Distributed Connection Tracking
+```toml
+[smtp.distributed]
+enabled = true
+global_max_per_ip = 30  # Cluster-wide limit
+gossip_interval = "5s"
+recipient_cache_ttl = "15m"
+```
+
+#### Circuit Breaker
+```toml
+[destination.circuit_breaker]
+enabled = true
+failure_threshold = 5
+timeout = "30s"
+```
+
+#### Health Check API
+```toml
+[health]
+enabled = true
+listen_addr = ":8080"
+username = "admin"
+password = "changeme"
 ```
 
 ### Environment Variables
 
-For security, sensitive values should be set via environment variables:
-
-- `S3_ACCESS_KEY_ID`: access key ID for S3 certificate storage
-- `S3_SECRET_ACCESS_KEY`: secret access key for S3 certificate storage
-- `DESTINATION_API_KEY`: API key for authenticating with the destination endpoint
-- `VALID_DOMAINS_URL`: URL or file path to the valid domains list
-
-## Building
+For security, use environment variables for secrets:
 
 ```bash
-go build -o smtp-relay .
+export S3_ACCESS_KEY_ID="your-key"
+export S3_SECRET_ACCESS_KEY="your-secret"
+export DESTINATION_API_KEY="your-api-key"
 ```
 
-## Running
+## 🔧 Admin CLI
+
+Mizu includes a command-line tool for operational tasks:
 
 ```bash
-./smtp-relay
+# Build admin CLI
+go build -o mizu-admin ./cmd/mizu-admin
+
+# Check health
+./mizu-admin health
+
+# View stats
+./mizu-admin stats
+
+# List blocked IPs
+./mizu-admin blocked-ips
+
+# Flush recipient cache (distributed mode)
+./mizu-admin flush-cache
+
+# With authentication
+./mizu-admin health -username admin -password changeme
 ```
 
-## Dependencies
-
-- **github.com/caddyserver/certmagic**: Automatic HTTPS certificate management
-- **github.com/emersion/go-smtp**: SMTP server implementation
-- **github.com/mileusna/spf**: SPF record validation
-- **github.com/minio/minio-go/v7**: S3-compatible storage client
-- **go.uber.org/zap**: Structured logging
-
-## Domain Validation
-
-The server validates recipient domains against a whitelist that can be loaded from:
-- **HTTP/HTTPS URL**: e.g., S3/R2 bucket (`https://bucket.r2.dev/domains.json`)
-- **Local file path**: e.g., `/path/to/domains.json` or `./domains.json`
-
-### Domain List Format
-
-The domains list should be a JSON array stored at the configured URL:
-
-```json
-[
-  "example.com",
-  "customer1.com",
-  "customer2.org"
-]
-```
-
-### Features
-
-- **Initial Load**: Domains are fetched on startup (server won't start if fetch fails)
-- **Automatic Refresh**: List is refreshed every minute in the background
-- **ETag Support**: Uses HTTP ETag headers to minimize bandwidth usage
-- **Case Insensitive**: Domain matching is case-insensitive
-- **Graceful Failures**: If refresh fails, the server continues with the last known good list
-- **Availability Protection**: Server rejects new SMTP sessions with 4xx error if domain list has never been successfully loaded
-- **Stale List Handling**: If domain refresh fails, unknown domains get temporary 4xx error (not permanent rejection)
-- **Local Mode**: In local mode, only accepts emails for the configured SMTP domain (no external list required)
-
-## Architecture
-
-1. **SMTP Reception**: The server listens on port 25 and accepts incoming SMTP connections
-2. **TLS/STARTTLS**: Automatic certificate issuance and renewal via Let's Encrypt
-3. **Certificate Storage**: Certificates are stored in S3 with distributed locking for multi-instance deployments
-4. **Domain Validation**: Valid recipient domains are fetched from S3/R2 URL on startup and refreshed every minute
-5. **Email Processing**: Incoming emails undergo SPF validation and domain whitelist checking
-6. **HTTP Forwarding**: Valid emails are converted to HTTP POST requests and sent to the configured endpoint
-7. **Error Handling**: Failed deliveries are logged (production systems should implement retry queues)
-
-### Domain Validation Behavior
-
-- **Normal Operation**: When domain list is fresh, unknown domains are permanently rejected (5xx)
-- **Stale List**: When domain refresh fails, unknown domains get temporary rejection (4xx "try again later")
-- **Never Loaded**: If domain list was never successfully loaded, all new sessions are rejected (4xx)
-- **Local Mode**: Only accepts emails for the configured SMTP domain
-
-## Security Features
-
-- **Mandatory STARTTLS**: All email transmissions must use TLS encryption (no plaintext allowed)
-- **SPF Validation**: Basic SPF checking for sender validation
-- **Domain Whitelist**: Dynamic domain validation with S3-hosted whitelist
-- **Automatic Domain Refresh**: Domain list updates every minute with ETag support
-- **TLS Enforcement**: Modern TLS versions (1.2+) required
-- **SMTPUTF8 Support**: Full support for international email addresses and content
-- **Message Size Limits**: Configurable maximum message size (default: 10MB)
-
-## Local Development Mode
-
-The server supports a local development mode that's useful for testing without requiring TLS certificates or external services:
+## 🧪 Testing
 
 ```bash
-# Run with default domain (localhost)
-./smtp-relay --local
+# Run all tests
+make test
 
-# Or specify a custom domain
-./smtp-relay --local --smtp.domain=test.local
+# Run with race detection
+go test -race ./...
 
-# Or use a domains list in local mode
-./smtp-relay --local --domains-url=/path/to/domains.json
+# Run specific package tests
+go test ./pkg/smtp -v
 
-# Or load domains from URL in local mode
-./smtp-relay --local --domains-url=https://example.com/domains.json
-```
+# Run integration tests
+go test ./pkg/smtp -run E2E -v
 
-In local mode:
-- **No TLS/STARTTLS required**: Accepts plaintext SMTP connections
-- **No certificate management**: Doesn't attempt to issue or fetch certificates
-- **No S3 required**: Doesn't need S3 credentials or bucket configuration
-- **No HTTP POST**: Instead of posting to a destination endpoint, dumps email content to terminal
-- **Domain validation**: 
-  - If `domains_url` is provided, loads domains from URL or file (same as production)
-  - If not provided, only accepts emails for the configured SMTP domain
-- **Default domain**: Automatically uses "localhost" if no domain is specified
-
-Example local mode testing with telnet:
-```bash
+# Test with telnet (local mode)
+./mizu --local &
 telnet localhost 25
+```
+
+Example SMTP session:
+```
 EHLO test.local
-MAIL FROM: <sender@example.com>
-RCPT TO: <recipient@test.local>
+MAIL FROM:<sender@example.com>
+RCPT TO:<recipient@example.com>
 DATA
 Subject: Test Email
 
-This is a test message.
+This is a test.
 .
 QUIT
 ```
+
+## 📊 Monitoring & Observability
+
+### Health Check Endpoint
+
+```bash
+# Basic health check
+curl http://localhost:8080/health
+
+# With authentication
+curl -u admin:changeme http://localhost:8080/health
+
+# View stats
+curl -u admin:changeme http://localhost:8080/api/stats
+
+# Flush cache
+curl -X POST -u admin:changeme http://localhost:8080/api/flush-cache
+```
+
+### Logging
+
+```toml
+log_format = "json"  # or "text"
+```
+
+JSON logs include:
+- `trace_id` - Unique per session for correlation
+- `remote_addr` - Client IP:port
+- `from` / `to` - Envelope addresses
+- Structured fields for all events
+
+### Metrics to Monitor
+
+- Active session count (logged every 30s if > 0)
+- Circuit breaker state transitions
+- Rate limit exceeded events
+- DMARC/SPF failures
+- Reputation scores
+- Connection limit utilization
+
+## 🚀 Production Deployment
+
+### Single Instance
+
+```bash
+# systemd service
+sudo systemctl start mizu
+sudo systemctl enable mizu
+```
+
+### Multi-Instance Cluster (Recommended)
+
+```bash
+# Deploy 3+ instances with:
+# - Shared S3 bucket for certs & stats
+# - P2P gossip for real-time coordination
+# - DNS round-robin for load distribution
+
+# Instance 1
+./mizu --config config-server1.toml
+
+# Instance 2
+./mizu --config config-server2.toml
+
+# Instance 3
+./mizu --config config-server3.toml
+```
+
+### Production Checklist
+
+- **Pre-deployment**: Review all config sections, set environment variables for secrets
+- **Security hardening**: Enable all validation, configure blacklists, set connection limits
+- **Performance tuning**: Adjust rate limits, circuit breaker thresholds based on load
+- **Monitoring setup**: Enable health endpoints with authentication, review logs regularly
+- **Emergency procedures**: Have rollback plan, monitor circuit breaker state
+- **Scaling**: Deploy 3+ instances with cluster mode, use DNS round-robin
+
+## 🏛️ Architecture Details
+
+### Package Structure
+
+```
+.
+├── cmd/
+│   ├── mizu/              # Main SMTP server
+│   └── mizu-admin/        # Admin CLI tool
+├── pkg/
+│   ├── blacklist/         # DNS blacklist checking
+│   ├── config/            # Configuration loading
+│   ├── health/            # Health check HTTP server
+│   ├── logging/           # Structured logging
+│   ├── poster/            # HTTP delivery + circuit breaker
+│   ├── smtp/              # SMTP server implementation
+│   │   ├── server.go      # Core SMTP logic
+│   │   ├── connection_tracker.go
+│   │   ├── distributed_tracker.go
+│   │   ├── rate_limiter.go
+│   │   └── *_test.go      # Comprehensive tests
+│   ├── stats/             # Reputation tracking
+│   ├── storage/           # S3 certificate storage
+│   └── validation/        # SPF, DMARC, DKIM validation
+└── config.toml.example    # Example configuration
+```
+
+### Key Design Decisions
+
+1. **Synchronous Delivery** - No queue needed, SMTP session blocks until HTTP delivery
+2. **No Message Loss** - SMTP 250 OK only after HTTP 200/202 (verified in audit)
+3. **Distributed by Default** - P2P gossip + S3 sync for cluster coordination
+4. **Circuit Breaker** - Protects both server and destination from cascading failures
+5. **Panic Recovery** - Defense-in-depth prevents WaitGroup deadlocks
+
+## 🐛 Known Limitations
+
+- **No Message Queue** - Synchronous delivery blocks SMTP session (by design)
+- **Single Destination** - One HTTP endpoint per instance (use multiple instances for multiple backends)
+- **No Prometheus Metrics** - Only JSON API available (planned enhancement)
+- **Per-Instance Connection Limits** - Not cluster-wide unless distributed tracking enabled
+
+## 🤝 Contributing
+
+Contributions welcome! Please:
+
+1. Review architecture details in this README
+2. Run tests: `make test` and `go test -race ./...`
+3. Follow existing code patterns
+4. Add tests for new features
+5. Update documentation
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## 🙏 Credits
+
+Built with:
+- [certmagic](https://github.com/caddyserver/certmagic) - Automatic HTTPS
+- [go-smtp](https://github.com/emersion/go-smtp) - SMTP server
+- [go-msgauth](https://github.com/emersion/go-msgauth) - DMARC/DKIM/SPF
+- [minio-go](https://github.com/minio/minio-go) - S3 client
+- [zap](https://github.com/uber-go/zap) - Structured logging
+
+## 🔗 Related Projects
+
+- [mizu-worker](https://github.com/yourusername/mizu-worker) - Example Cloudflare Worker backend
+- [mizu-helm](https://github.com/yourusername/mizu-helm) - Kubernetes Helm charts
+
+---
+
+**Mizu** - Like water, emails flow smoothly and reliably 💧

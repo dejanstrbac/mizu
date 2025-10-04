@@ -5,28 +5,51 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"go.uber.org/zap"
 )
 
-// HTTPClient is the shared HTTP client for posting emails to the destination endpoint.
-// Configured with a 30-second timeout to handle potentially slow backend systems.
-var HTTPClient = &http.Client{
-	Timeout: 30 * time.Second,
+// NewHTTPClient creates a new HTTP client with the specified timeout.
+// The timeout controls the maximum time for the entire request/response cycle.
+func NewHTTPClient(timeout time.Duration) *http.Client {
+	return &http.Client{
+		Timeout: timeout,
+	}
 }
 
 // PostEmailToDestination sends the raw email content to the destination with retry logic.
 // This is a convenience wrapper that uses a background context.
-func PostEmailToDestination(rawEmail string, destinationURL, apiKey string, maxRetryAttempts int) error {
-	return PostEmailToDestinationWithContext(context.Background(), rawEmail, destinationURL, apiKey, maxRetryAttempts, false)
+// Deprecated: Use PostEmailToDestinationWithContext instead.
+func PostEmailToDestination(rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, logger *zap.Logger) error {
+	client := NewHTTPClient(30 * time.Second) // Use default 30s timeout for backward compatibility
+	return PostEmailToDestinationWithContext(context.Background(), rawEmail, destinationURL, apiKey, maxRetryAttempts, false, "", nil, "", nil, client, logger)
 }
 
 // PostEmailToDestinationWithContext sends the raw email content to the destination with retry logic and context support.
 // It implements exponential backoff between retries and respects context cancellation.
 // The isJunk parameter adds an X-Junk header to help the destination system handle spam appropriately.
-func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool) error {
+// The mailFrom and mailTo parameters are added as X-Mail-From and X-Mail-To headers with envelope addresses.
+// The traceID parameter is added as X-Trace-ID header for distributed tracing and log correlation.
+// The circuitBreaker parameter is optional - if provided, requests will be protected by the circuit breaker pattern.
+// The httpClient parameter specifies the HTTP client to use for requests (with configured timeout).
+func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, circuitBreaker *CircuitBreaker, httpClient *http.Client, logger *zap.Logger) error {
+	// If circuit breaker is provided and enabled, use it
+	if circuitBreaker != nil {
+		return circuitBreaker.Call(func() error {
+			return postEmailWithRetries(ctx, rawEmail, destinationURL, apiKey, maxRetryAttempts, isJunk, mailFrom, mailTo, traceID, httpClient, logger)
+		})
+	}
+
+	// No circuit breaker, call directly
+	return postEmailWithRetries(ctx, rawEmail, destinationURL, apiKey, maxRetryAttempts, isJunk, mailFrom, mailTo, traceID, httpClient, logger)
+}
+
+// postEmailWithRetries contains the actual retry logic
+func postEmailWithRetries(ctx context.Context, rawEmail string, destinationURL, apiKey string, maxRetryAttempts int, isJunk bool, mailFrom string, mailTo []string, traceID string, httpClient *http.Client, logger *zap.Logger) error {
 	var lastErr error
 
 	// Ensure at least one attempt even if configured incorrectly
@@ -47,7 +70,7 @@ func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, des
 		// Backoff sequence: 0s (first attempt), 1s, 2s, 4s, 8s, etc.
 		if attempt > 0 {
 			backoff := time.Duration(1<<(attempt-1)) * time.Second
-			log.Printf("Retrying HTTP post to URL (attempt %d/%d) after %v delay", attempt+1, maxRetryAttempts, backoff)
+			logger.Sugar().Infof("Retrying HTTP post to URL (attempt %d/%d) after %v delay", attempt+1, maxRetryAttempts, backoff)
 
 			// Sleep with context awareness - allows early cancellation
 			select {
@@ -58,7 +81,7 @@ func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, des
 			}
 		}
 
-		err := postEmailAttemptWithContext(ctx, rawEmail, destinationURL, apiKey, isJunk)
+		err := postEmailAttemptWithContext(ctx, rawEmail, destinationURL, apiKey, isJunk, mailFrom, mailTo, traceID, httpClient, logger)
 		if err == nil {
 			// Success
 			return nil
@@ -68,24 +91,28 @@ func PostEmailToDestinationWithContext(ctx context.Context, rawEmail string, des
 
 		// Determine if the error warrants a retry
 		// Non-retryable errors (like 4xx HTTP codes) fail immediately
-		if !isRetryableError(err) {
-			log.Printf("Non-retryable error posting to URL: %v", err)
+		if !IsRetryableError(err) {
+			logger.Sugar().Warnf("Non-retryable error posting to URL: %v", err)
 			return err
 		}
 
 		if attempt < maxRetryAttempts-1 {
-			log.Printf("Retryable error posting to URL (attempt %d/%d): %v", attempt+1, maxRetryAttempts, err)
+			logger.Sugar().Warnf("Retryable error posting to URL (attempt %d/%d): %v", attempt+1, maxRetryAttempts, err)
 		}
 	}
 
 	// All retries exhausted
-	log.Printf("All retry attempts exhausted (%d/%d) posting to URL: %v", maxRetryAttempts, maxRetryAttempts, lastErr)
+	logger.Sugar().Errorf("All retry attempts exhausted (%d/%d) posting to URL: %v", maxRetryAttempts, maxRetryAttempts, lastErr)
 	return fmt.Errorf("failed after %d attempts: %w", maxRetryAttempts, lastErr)
 }
 
 // postEmailAttemptWithContext performs a single attempt to post the email with context support.
 // It sends the raw email as message/rfc822 content type with API key authentication.
-func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool) error {
+func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinationURL, apiKey string, isJunk bool, mailFrom string, mailTo []string, traceID string, httpClient *http.Client, logger *zap.Logger) error {
+	if httpClient == nil {
+		return fmt.Errorf("httpClient cannot be nil")
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "POST", destinationURL, strings.NewReader(rawEmail))
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP request: %w", err)
@@ -95,12 +122,25 @@ func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinati
 	req.Header.Set("Content-Type", "message/rfc822") // RFC 2822 compliant email format
 	req.Header.Set("X-API-Key", apiKey)              // Authentication header
 
+	// Add envelope addresses as headers
+	if mailFrom != "" {
+		req.Header.Set("X-Mail-From", mailFrom)
+	}
+	if len(mailTo) > 0 {
+		req.Header.Set("X-Mail-To", strings.Join(mailTo, ", "))
+	}
+
+	// Add trace ID for distributed tracing and log correlation
+	if traceID != "" {
+		req.Header.Set("X-Trace-ID", traceID)
+	}
+
 	// Signal to destination that this message was classified as junk/spam
 	if isJunk {
 		req.Header.Set("X-Junk", "yes")
 	}
 
-	resp, err := HTTPClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send HTTP request to URL: %w", err)
 	}
@@ -111,16 +151,21 @@ func postEmailAttemptWithContext(ctx context.Context, rawEmail string, destinati
 		return NewHTTPStatusError(resp.StatusCode, string(bodyBytes))
 	}
 
-	log.Printf("Successfully sent email to destination URL, status: %d", resp.StatusCode)
+	logger.Sugar().Infof("Successfully sent email to destination URL, status: %d", resp.StatusCode)
 	return nil
 }
 
-// isRetryableError determines if an error should trigger a retry.
+// IsRetryableError determines if an error should trigger a retry.
 // Returns false for permanent failures (4xx HTTP codes, context cancellation).
 // Returns true for temporary failures (5xx codes, network errors, timeouts).
-func isRetryableError(err error) bool {
+func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
+	}
+
+	// Circuit breaker being open is a temporary, retryable state.
+	if errors.Is(err, ErrCircuitOpen) {
+		return true
 	}
 
 	// Check if it's an HTTP status error with specific retry logic
@@ -134,18 +179,23 @@ func isRetryableError(err error) bool {
 		return false
 	}
 
-	// Network errors are generally retryable as they're often temporary
-	// Check for common network error patterns in the error message
-	errStr := err.Error()
-	if strings.Contains(errStr, "connection refused") ||
-		strings.Contains(errStr, "connection reset") ||
-		strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "no such host") ||
-		strings.Contains(errStr, "temporary failure") ||
-		strings.Contains(errStr, "dial tcp") {
-		return true
+	// Check for specific network errors that are generally retryable.
+	// This is more robust than string matching.
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() || netErr.Temporary() {
+			return true
+		}
+
+		// A DNS lookup error can be temporary.
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			return true
+		}
+
+		return strings.Contains(err.Error(), "connection refused")
 	}
 
-	// Default to retryable for unknown errors to err on the side of delivery
-	return true
+	// Default to non-retryable for unknown errors to avoid infinite retry loops on unexpected issues.
+	return false
 }

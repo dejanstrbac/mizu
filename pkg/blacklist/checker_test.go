@@ -1,0 +1,213 @@
+package blacklist
+
+import (
+	"net"
+	"testing"
+	"time"
+
+	"go.uber.org/zap"
+)
+
+func TestReverseIPAddress(t *testing.T) {
+	tests := []struct {
+		name     string
+		ip       string
+		expected string
+	}{
+		{
+			name:     "standard IPv4",
+			ip:       "192.168.1.1",
+			expected: "1.1.168.192",
+		},
+		{
+			name:     "localhost",
+			ip:       "127.0.0.1",
+			expected: "1.0.0.127",
+		},
+		{
+			name:     "IPv6 returns empty",
+			ip:       "2001:0db8::1",
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ip := net.ParseIP(tt.ip)
+			if ip == nil {
+				t.Fatalf("failed to parse IP: %s", tt.ip)
+			}
+			result := reverseIPAddress(ip)
+			if result != tt.expected {
+				t.Errorf("reverseIPAddress(%s) = %s; want %s", tt.ip, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGetSpamhausReason(t *testing.T) {
+	tests := []struct {
+		code     byte
+		expected string
+	}{
+		{2, "SBL - Spam source"},
+		{3, "CSS - Snowshoe spam"},
+		{4, "XBL - Exploited/compromised"},
+		{5, "XBL - Exploited/compromised"},
+		{6, "XBL - Exploited/compromised"},
+		{7, "XBL - Exploited/compromised"},
+		{9, "DROP - Hijacked netblocks"},
+		{10, "PBL - Policy block list"},
+		{11, "PBL - Policy block list"},
+		{99, "Code 99"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.expected, func(t *testing.T) {
+			result := getSpamhausReason(tt.code)
+			if result != tt.expected {
+				t.Errorf("getSpamhausReason(%d) = %s; want %s", tt.code, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestCheckHELOResolves(t *testing.T) {
+	tests := []struct {
+		name          string
+		hostname      string
+		shouldResolve bool
+		expectError   bool
+	}{
+		{
+			name:          "IP in brackets",
+			hostname:      "[192.168.1.1]",
+			shouldResolve: true,
+			expectError:   false,
+		},
+		{
+			name:          "valid hostname",
+			hostname:      "localhost",
+			shouldResolve: true,
+			expectError:   false,
+		},
+		{
+			name:          "invalid hostname",
+			hostname:      "this-hostname-definitely-does-not-exist-12345.invalid",
+			shouldResolve: false,
+			expectError:   false, // A non-resolving host is a valid check, not an error
+		},
+		{
+			name:          "empty hostname",
+			hostname:      "",
+			shouldResolve: false,
+			expectError:   false, // Should not resolve, but not error
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resolves, err := CheckHELOResolves(tt.hostname, 2*time.Second)
+
+			if tt.expectError && err == nil {
+				t.Error("expected error but got none")
+			}
+
+			if !tt.expectError && err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+
+			if !tt.expectError && resolves != tt.shouldResolve {
+				t.Errorf("CheckHELOResolves(%s) = %v; want %v", tt.hostname, resolves, tt.shouldResolve)
+			}
+		})
+	}
+}
+
+func TestNewChecker(t *testing.T) {
+	logger := zap.NewNop()
+	lists := []string{"zen.spamhaus.org", "bl.spamcop.net"}
+	timeout := 3 * time.Second
+
+	checker := NewChecker(lists, timeout, logger)
+
+	if checker == nil {
+		t.Fatal("NewChecker returned nil")
+	}
+
+	if len(checker.lists) != len(lists) {
+		t.Errorf("checker has %d lists; want %d", len(checker.lists), len(lists))
+	}
+
+	if checker.timeout != timeout {
+		t.Errorf("checker timeout = %v; want %v", checker.timeout, timeout)
+	}
+
+	if checker.resolver == nil {
+		t.Error("checker resolver is nil")
+	}
+}
+
+func TestCheckerCheckIP_ValidIP(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Use a non-existent blacklist to ensure we get a clean non-listed result
+	checker := NewChecker([]string{"invalid-blacklist-that-does-not-exist.example"}, 1*time.Second, logger)
+
+	ip := net.ParseIP("8.8.8.8")
+	if ip == nil {
+		t.Fatal("failed to parse IP")
+	}
+
+	isListed, reason, err := checker.CheckIP(ip)
+
+	// We expect no error and not listed since the blacklist doesn't exist
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	if isListed {
+		t.Errorf("IP should not be listed, but got: %s", reason)
+	}
+}
+
+func TestCheckerCheckIP_InvalidIP(t *testing.T) {
+	logger := zap.NewNop()
+	checker := NewChecker([]string{"zen.spamhaus.org"}, 1*time.Second, logger)
+
+	// Test with IPv6 (not supported)
+	ip := net.ParseIP("2001:0db8::1")
+	if ip == nil {
+		t.Fatal("failed to parse IP")
+	}
+
+	isListed, reason, err := checker.CheckIP(ip)
+
+	if err == nil {
+		t.Error("expected error for IPv6, got nil")
+	}
+
+	if isListed {
+		t.Errorf("IPv6 should return error, not listed status with reason: %s", reason)
+	}
+}
+
+func TestCheckerCheckIP_Timeout(t *testing.T) {
+	logger := zap.NewNop()
+
+	// Use very short timeout to test timeout behavior
+	checker := NewChecker([]string{"zen.spamhaus.org"}, 1*time.Nanosecond, logger)
+
+	ip := net.ParseIP("8.8.8.8")
+	if ip == nil {
+		t.Fatal("failed to parse IP")
+	}
+
+	// With such a short timeout, the lookup should fail but not return listed
+	isListed, _, _ := checker.CheckIP(ip)
+
+	// Even with timeout, we should fail open (not block)
+	if isListed {
+		t.Error("IP should not be listed when timeout occurs (fail open)")
+	}
+}

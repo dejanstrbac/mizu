@@ -35,6 +35,16 @@ func (e *HTTPStatusError) IsRetryable() bool {
 	return e.StatusCode >= 500 && e.StatusCode < 600
 }
 
+// IsRecipientNotFound returns true if the status code indicates recipient not found (404)
+func (e *HTTPStatusError) IsRecipientNotFound() bool {
+	return e.StatusCode == 404
+}
+
+// IsRecipientBlocked returns true if the status code indicates recipient is blocked (403)
+func (e *HTTPStatusError) IsRecipientBlocked() bool {
+	return e.StatusCode == 403
+}
+
 // NewHTTPStatusError creates a new HTTPStatusError
 func NewHTTPStatusError(statusCode int, body string) *HTTPStatusError {
 	return &HTTPStatusError{

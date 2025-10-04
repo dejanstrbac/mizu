@@ -1,0 +1,750 @@
+package stats
+
+import (
+	"context"
+	"net"
+	"strings"
+	"sync"
+	"time"
+
+	"migadu/mizu/pkg/health"
+
+	"go.uber.org/zap"
+)
+
+const (
+	// stalePeerTimeout is the duration after which a peer is considered stale if its stats file is missing.
+	stalePeerTimeout = 24 * time.Hour
+)
+
+// eventType defines the type of statistical event
+type eventType int
+
+const (
+	eventConnection eventType = iota
+	eventMailFrom
+	eventInvalidRecipient
+	eventSpoofingAttempt
+	eventDMARCFailure
+	eventJunkMessage
+	eventHamDelivery
+)
+
+const eventChanBufferSize = 1000
+
+// Manager handles IP and domain reputation tracking
+type Manager struct {
+	enabled           bool
+	retentionDuration time.Duration
+	logger            *zap.Logger
+
+	// Sync configuration
+	syncEnabled  bool
+	syncInterval time.Duration
+	syncServers  []string
+	hostname     string
+
+	// LRU eviction limits
+	maxIPEntries     int
+	maxDomainEntries int
+
+	// Maps for tracking IPs and domains
+	ips     map[string]*IPEntry
+	domains map[string]*DomainEntry
+
+	// Mutex for map access
+	ipMu     sync.RWMutex
+	domainMu sync.RWMutex
+
+	// Track sync times per server
+	lastSync        map[string]time.Time // Tracks LastModified time of successfully synced objects
+	lastSyncAttempt map[string]time.Time // Tracks the time of the last sync attempt for a peer
+	lastSyncMu      sync.RWMutex
+
+	// Context for cleanup goroutine
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// Channel for processing events concurrently
+	eventChan chan event
+
+	// Metrics for monitoring event processing
+	eventsProcessed uint64 // Total events successfully processed
+	eventsDropped   uint64 // Total events dropped due to full channel
+	metricsMu       sync.RWMutex
+}
+
+// event represents a statistical event to be processed
+type event struct {
+	Type   eventType
+	IP     string
+	Domain string
+}
+
+// NewManager creates a new stats manager
+func NewManager(enabled bool, retentionDuration time.Duration, hostname string, syncEnabled bool, syncInterval time.Duration, syncServers []string, maxIPEntries, maxDomainEntries int, logger *zap.Logger) *Manager {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	return &Manager{
+		enabled:           enabled,
+		retentionDuration: retentionDuration,
+		hostname:          hostname,
+		syncEnabled:       syncEnabled,
+		syncInterval:      syncInterval,
+		syncServers:       syncServers,
+		maxIPEntries:      maxIPEntries,
+		maxDomainEntries:  maxDomainEntries,
+		logger:            logger,
+		ips:               make(map[string]*IPEntry),
+		domains:           make(map[string]*DomainEntry),
+		lastSync:          make(map[string]time.Time),
+		lastSyncAttempt:   make(map[string]time.Time),
+		ctx:               ctx,
+		cancel:            cancel,
+		eventChan:         make(chan event, eventChanBufferSize),
+	}
+}
+
+// Start begins the cleanup goroutine
+func (m *Manager) Start() {
+	if !m.enabled {
+		m.logger.Info("Stats tracking disabled")
+		return
+	}
+
+	m.logger.Sugar().Infof("Starting stats manager with %v retention", m.retentionDuration)
+
+	// Start cleanup goroutine
+	go m.cleanupLoop()
+
+	// Start event processing goroutine
+	go m.processEventsLoop()
+}
+
+// Stop stops the cleanup goroutine
+func (m *Manager) Stop() {
+	if m.cancel != nil {
+		m.cancel()
+		close(m.eventChan)
+	}
+}
+
+// cleanupLoop periodically removes expired entries
+func (m *Manager) cleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute) // Run cleanup every 5 minutes
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			m.cleanup()
+		case <-m.ctx.Done():
+			m.logger.Info("Stats cleanup loop stopped")
+			return
+		}
+	}
+}
+
+// processEventsLoop is the central goroutine for processing statistical events.
+// This serializes all write access to the stats maps, reducing lock contention.
+func (m *Manager) processEventsLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			m.logger.Error("panic in stats event processing loop",
+				zap.Any("panic", r),
+				zap.Stack("stack"),
+			)
+			// Critical: restart the loop if it panics
+			m.logger.Warn("Restarting stats event processing loop after panic")
+			go m.processEventsLoop()
+		}
+	}()
+
+	m.logger.Info("Starting stats event processing loop")
+	for {
+		select {
+		case e, ok := <-m.eventChan:
+			if !ok {
+				m.logger.Info("Stats event channel closed, stopping loop")
+				return
+			}
+			m.handleEvent(e)
+		case <-m.ctx.Done():
+			// On shutdown, drain any remaining events in the channel
+			m.logger.Info("Context cancelled, draining remaining stats events...")
+			for {
+				select {
+				case e, ok := <-m.eventChan:
+					if !ok {
+						m.logger.Info("Finished draining stats event channel.")
+						return
+					}
+					m.handleEvent(e)
+				default:
+					m.logger.Info("Finished draining stats event channel.")
+					return
+				}
+			}
+		}
+	}
+}
+
+// handleEvent processes a single statistical event.
+func (m *Manager) handleEvent(e event) {
+	// Increment processed counter
+	m.metricsMu.Lock()
+	m.eventsProcessed++
+	m.metricsMu.Unlock()
+
+	switch e.Type {
+	case eventConnection:
+		entry := m.getOrCreateIP(e.IP)
+		entry.IncrementConnections()
+		// hasRDNS is passed via the Domain field for this event type
+		if e.Domain == "no" {
+			entry.mu.Lock()
+			entry.IsDenied = true
+			entry.mu.Unlock()
+		}
+	case eventMailFrom:
+		if e.Domain != "" {
+			entry := m.getOrCreateDomain(e.Domain)
+			entry.IncrementMessages()
+		}
+	case eventInvalidRecipient:
+		m.applyNegativeWeight(e.IP, e.Domain, WeightInvalidRecipient)
+	case eventSpoofingAttempt:
+		m.applyNegativeWeight(e.IP, e.Domain, WeightSpoofingAttempt)
+	case eventDMARCFailure:
+		m.applyNegativeWeight(e.IP, e.Domain, WeightDMARCFailure)
+	case eventJunkMessage:
+		m.applyNegativeWeight(e.IP, e.Domain, WeightJunkMessage)
+	case eventHamDelivery:
+		m.applyPositiveWeight(e.IP, e.Domain, WeightHamDelivery)
+	}
+}
+
+// cleanup removes expired entries and enforces LRU limits
+func (m *Manager) cleanup() {
+	// Clean IPs
+	m.ipMu.Lock()
+	expiredIPs := 0
+	for ip, entry := range m.ips {
+		if entry.IsExpired(m.retentionDuration) {
+			delete(m.ips, ip)
+			expiredIPs++
+		}
+	}
+
+	// Enforce LRU eviction if over limit
+	evictedIPs := 0
+	if m.maxIPEntries > 0 && len(m.ips) > m.maxIPEntries {
+		evictedIPs = m.evictLRUIPs(len(m.ips) - m.maxIPEntries)
+	}
+	m.ipMu.Unlock()
+
+	// Clean domains
+	m.domainMu.Lock()
+	expiredDomains := 0
+	for domain, entry := range m.domains {
+		if entry.IsExpired(m.retentionDuration) {
+			delete(m.domains, domain)
+			expiredDomains++
+		}
+	}
+
+	// Enforce LRU eviction if over limit
+	evictedDomains := 0
+	if m.maxDomainEntries > 0 && len(m.domains) > m.maxDomainEntries {
+		evictedDomains = m.evictLRUDomains(len(m.domains) - m.maxDomainEntries)
+	}
+	m.domainMu.Unlock()
+
+	if expiredIPs > 0 || expiredDomains > 0 || evictedIPs > 0 || evictedDomains > 0 {
+		m.logger.Debug("Cleaned expired stats entries",
+			zap.Int("expired_ips", expiredIPs),
+			zap.Int("expired_domains", expiredDomains),
+			zap.Int("evicted_ips", evictedIPs),
+			zap.Int("evicted_domains", evictedDomains),
+			zap.Int("remaining_ips", len(m.ips)),
+			zap.Int("remaining_domains", len(m.domains)))
+	}
+}
+
+// evictLRUIPs evicts the oldest n IP entries based on LastSeen time
+// Caller must hold ipMu.Lock()
+func (m *Manager) evictLRUIPs(n int) int {
+	if n <= 0 {
+		return 0
+	}
+
+	// Build a list of candidates for eviction (sorted by LastSeen)
+	type candidate struct {
+		ip       string
+		lastSeen time.Time
+	}
+	candidates := make([]candidate, 0, len(m.ips))
+
+	for ip, entry := range m.ips {
+		entry.mu.RLock()
+		candidates = append(candidates, candidate{ip: ip, lastSeen: entry.LastSeen})
+		entry.mu.RUnlock()
+	}
+
+	// Sort by LastSeen (oldest first)
+	for i := 0; i < len(candidates)-1; i++ {
+		for j := i + 1; j < len(candidates); j++ {
+			if candidates[i].lastSeen.After(candidates[j].lastSeen) {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			}
+		}
+	}
+
+	// Evict the oldest n entries
+	evicted := 0
+	for i := 0; i < n && i < len(candidates); i++ {
+		delete(m.ips, candidates[i].ip)
+		evicted++
+	}
+
+	return evicted
+}
+
+// evictLRUDomains evicts the oldest n domain entries based on LastSeen time
+// Caller must hold domainMu.Lock()
+func (m *Manager) evictLRUDomains(n int) int {
+	if n <= 0 {
+		return 0
+	}
+
+	// Build a list of candidates for eviction (sorted by LastSeen)
+	type candidate struct {
+		domain   string
+		lastSeen time.Time
+	}
+	candidates := make([]candidate, 0, len(m.domains))
+
+	for domain, entry := range m.domains {
+		entry.mu.RLock()
+		candidates = append(candidates, candidate{domain: domain, lastSeen: entry.LastSeen})
+		entry.mu.RUnlock()
+	}
+
+	// Sort by LastSeen (oldest first)
+	for i := 0; i < len(candidates)-1; i++ {
+		for j := i + 1; j < len(candidates); j++ {
+			if candidates[i].lastSeen.After(candidates[j].lastSeen) {
+				candidates[i], candidates[j] = candidates[j], candidates[i]
+			}
+		}
+	}
+
+	// Evict the oldest n entries
+	evicted := 0
+	for i := 0; i < n && i < len(candidates); i++ {
+		delete(m.domains, candidates[i].domain)
+		evicted++
+	}
+
+	return evicted
+}
+
+// getOrCreateIP gets or creates an IP entry. This uses locks as it can be called
+// from the event loop or from reputation checks.
+func (m *Manager) getOrCreateIP(ip string) *IPEntry {
+	m.ipMu.RLock()
+	entry, exists := m.ips[ip]
+	m.ipMu.RUnlock()
+
+	if exists && entry != nil {
+		return entry
+	}
+
+	// Create new entry
+	m.ipMu.Lock()
+	defer m.ipMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if entry, exists := m.ips[ip]; exists && entry != nil {
+		return entry
+	}
+
+	now := time.Now()
+	entry = &IPEntry{
+		FirstSeen: now,
+		LastSeen:  now,
+	}
+	m.ips[ip] = entry
+	return entry
+}
+
+// getOrCreateDomain gets or creates a domain entry.
+func (m *Manager) getOrCreateDomain(domain string) *DomainEntry {
+	// Normalize domain
+	domain = strings.ToLower(strings.TrimSpace(domain))
+
+	m.domainMu.RLock()
+	entry, exists := m.domains[domain]
+	m.domainMu.RUnlock()
+
+	if exists && entry != nil {
+		return entry
+	}
+
+	// Create new entry
+	m.domainMu.Lock()
+	defer m.domainMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if entry, exists := m.domains[domain]; exists && entry != nil {
+		return entry
+	}
+
+	now := time.Now()
+	entry = &DomainEntry{
+		FirstSeen: now,
+		LastSeen:  now,
+	}
+	m.domains[domain] = entry
+	return entry
+}
+
+// RecordConnection records a new connection from an IP by sending an event.
+func (m *Manager) RecordConnection(ip string, hasRDNS bool) {
+	if !m.enabled {
+		return
+	}
+
+	// Use the Domain field to pass the hasRDNS status.
+	rdnsStatus := "yes"
+	if !hasRDNS {
+		rdnsStatus = "no"
+	}
+
+	m.sendEvent(event{Type: eventConnection, IP: ip, Domain: rdnsStatus})
+}
+
+// RecordMailFrom records a MAIL FROM command by sending an event.
+func (m *Manager) RecordMailFrom(domain string) {
+	if !m.enabled || domain == "" {
+		return
+	}
+	m.sendEvent(event{Type: eventMailFrom, Domain: domain})
+}
+
+// RecordInvalidRecipient records an attempt to send to a non-existent address.
+func (m *Manager) RecordInvalidRecipient(ip, domain string) {
+	if !m.enabled {
+		return
+	}
+	m.sendEvent(event{Type: eventInvalidRecipient, IP: ip, Domain: domain})
+}
+
+// RecordSpoofingAttempt records a spoofing attempt.
+func (m *Manager) RecordSpoofingAttempt(ip, domain string) {
+	if !m.enabled {
+		return
+	}
+	m.sendEvent(event{Type: eventSpoofingAttempt, IP: ip, Domain: domain})
+}
+
+// RecordDMARCFailure records a DMARC policy failure.
+func (m *Manager) RecordDMARCFailure(ip, domain string) {
+	if !m.enabled {
+		return
+	}
+	m.sendEvent(event{Type: eventDMARCFailure, IP: ip, Domain: domain})
+}
+
+// RecordJunkMessage records a junk/spam message.
+func (m *Manager) RecordJunkMessage(ip, domain string) {
+	if !m.enabled {
+		return
+	}
+	m.sendEvent(event{Type: eventJunkMessage, IP: ip, Domain: domain})
+}
+
+// RecordHamDelivery records a successful ham (non-spam) delivery.
+func (m *Manager) RecordHamDelivery(ip, domain string) {
+	if !m.enabled {
+		return
+	}
+	m.sendEvent(event{Type: eventHamDelivery, IP: ip, Domain: domain})
+}
+
+// sendEvent is a non-blocking send to the event channel.
+// If the channel is full, it logs a warning and drops the event.
+func (m *Manager) sendEvent(e event) {
+	select {
+	case m.eventChan <- e:
+		// Event sent successfully
+	default:
+		// Channel is full - increment dropped counter
+		m.metricsMu.Lock()
+		m.eventsDropped++
+		droppedCount := m.eventsDropped
+		m.metricsMu.Unlock()
+
+		m.logger.Warn("Stats event channel is full, dropping event",
+			zap.Any("event_type", e.Type),
+			zap.Uint64("total_dropped", droppedCount))
+	}
+}
+
+// applyNegativeWeight applies a negative weight to IP and domain entries.
+// This is called by the event processing loop.
+func (m *Manager) applyNegativeWeight(ip, domain string, weight int64) {
+	if ip != "" {
+		ipEntry := m.getOrCreateIP(ip)
+		ipEntry.AddNegative(weight)
+	}
+	if domain != "" {
+		domainEntry := m.getOrCreateDomain(domain)
+		domainEntry.AddNegative(weight)
+	}
+}
+
+// applyPositiveWeight applies a positive weight to IP and domain entries.
+// This is called by the event processing loop.
+func (m *Manager) applyPositiveWeight(ip, domain string, weight int64) {
+	if ip != "" {
+		ipEntry := m.getOrCreateIP(ip)
+		ipEntry.AddPositive(weight)
+	}
+	if domain != "" {
+		domainEntry := m.getOrCreateDomain(domain)
+		domainEntry.AddPositive(weight)
+	}
+}
+
+// CheckIPReputation checks if an IP should be denied based on reputation
+func (m *Manager) CheckIPReputation(ip string) (shouldDeny bool, reputation float64) {
+	if !m.enabled {
+		return false, 0
+	}
+
+	m.ipMu.RLock()
+	entry, exists := m.ips[ip]
+	m.ipMu.RUnlock()
+
+	if !exists {
+		return false, 0 // No data, allow
+	}
+
+	return entry.ShouldDeny(), entry.GetReputation()
+}
+
+// CheckDomainReputation checks if a domain should be denied based on reputation
+func (m *Manager) CheckDomainReputation(domain string) (shouldDeny bool, reputation float64) {
+	if !m.enabled {
+		return false, 0
+	}
+
+	// Normalize domain
+	domain = strings.ToLower(strings.TrimSpace(domain))
+
+	m.domainMu.RLock()
+	entry, exists := m.domains[domain]
+	m.domainMu.RUnlock()
+
+	if !exists {
+		return false, 0 // No data, allow
+	}
+
+	return entry.ShouldDeny(), entry.GetReputation()
+}
+
+// GetIPFromRemoteAddr extracts IP from remote address string
+func GetIPFromRemoteAddr(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		// If split fails, try using the whole string as IP
+		return remoteAddr
+	}
+	return host
+}
+
+// ExtractDomainFromEmail extracts domain from email address
+func ExtractDomainFromEmail(email string) string {
+	email = strings.TrimSpace(email)
+	// Remove angle brackets if present
+	email = strings.Trim(email, "<>")
+
+	if idx := strings.LastIndex(email, "@"); idx != -1 {
+		return strings.ToLower(email[idx+1:])
+	}
+	return ""
+}
+
+// GetIPForTest is a helper function for integration tests to access an IP entry.
+// This should only be used in tests.
+func (m *Manager) GetIPForTest(ip string) *IPEntry {
+	m.ipMu.RLock()
+	defer m.ipMu.RUnlock()
+	if entry, exists := m.ips[ip]; exists {
+		return entry
+	}
+	return nil
+}
+
+// Name returns the component name for health checks.
+// GetStats returns a snapshot of current statistics (satisfies health.StatsProvider interface)
+func (m *Manager) GetStats() any {
+	return m.GetStatsSnapshot()
+}
+
+// GetStatsSnapshot returns a snapshot of current statistics
+func (m *Manager) GetStatsSnapshot() *StatsSnapshot {
+	if !m.enabled {
+		return &StatsSnapshot{
+			IPs:     make(map[string]*IPExport),
+			Domains: make(map[string]*DomainExport),
+			Summary: StatsSummary{},
+		}
+	}
+
+	m.ipMu.RLock()
+	ips := make(map[string]*IPExport, len(m.ips))
+	var totalConnections int64
+	var blockedCount int
+	for ip, entry := range m.ips {
+		ips[ip] = entry.ToExport()
+		totalConnections += entry.Connections
+		if entry.ShouldDeny() {
+			blockedCount++
+		}
+	}
+	m.ipMu.RUnlock()
+
+	m.domainMu.RLock()
+	domains := make(map[string]*DomainExport, len(m.domains))
+	var totalMessages, acceptedMessages, rejectedMessages int64
+	for domain, entry := range m.domains {
+		domains[domain] = entry.ToExport()
+		totalMessages += entry.Messages
+		acceptedMessages += entry.Positive
+		rejectedMessages += entry.Negative
+	}
+	m.domainMu.RUnlock()
+
+	m.metricsMu.RLock()
+	eventsProcessed := m.eventsProcessed
+	eventsDropped := m.eventsDropped
+	m.metricsMu.RUnlock()
+
+	return &StatsSnapshot{
+		IPs:     ips,
+		Domains: domains,
+		Summary: StatsSummary{
+			TotalIPs:         len(ips),
+			TotalDomains:     len(domains),
+			BlockedIPs:       blockedCount,
+			TotalConnections: totalConnections,
+			TotalMessages:    totalMessages,
+			AcceptedMessages: acceptedMessages,
+			RejectedMessages: rejectedMessages,
+			EventsProcessed:  int64(eventsProcessed),
+			EventsDropped:    int64(eventsDropped),
+		},
+	}
+}
+
+func (m *Manager) Name() string {
+	return "stats"
+}
+
+// CheckHealth checks the health of the stats manager.
+func (m *Manager) CheckHealth() health.ComponentStatus {
+	if !m.enabled {
+		return health.ComponentStatus{
+			Status:  "disabled",
+			Details: map[string]any{"enabled": false},
+		}
+	}
+
+	m.ipMu.RLock()
+	ipCount := len(m.ips)
+	m.ipMu.RUnlock()
+
+	m.domainMu.RLock()
+	domainCount := len(m.domains)
+	m.domainMu.RUnlock()
+
+	// Get event metrics
+	m.metricsMu.RLock()
+	eventsProcessed := m.eventsProcessed
+	eventsDropped := m.eventsDropped
+	m.metricsMu.RUnlock()
+
+	// Calculate channel utilization
+	chanLen := len(m.eventChan)
+	chanCap := cap(m.eventChan)
+	chanUtilization := float64(chanLen) / float64(chanCap) * 100.0
+
+	details := map[string]any{
+		"enabled":          true,
+		"tracked_ips":      ipCount,
+		"tracked_domains":  domainCount,
+		"events_processed": eventsProcessed,
+		"events_dropped":   eventsDropped,
+		"channel_length":   chanLen,
+		"channel_capacity": chanCap,
+		"channel_util_pct": chanUtilization,
+	}
+
+	// If sync is enabled, check last sync status
+	if m.syncEnabled {
+		m.lastSyncMu.RLock()
+		lastSyncTimes := make(map[string]string)
+		for server, t := range m.lastSyncAttempt {
+			lastSyncTimes[server] = time.Since(t).String()
+		}
+		m.lastSyncMu.RUnlock()
+
+		details["sync_enabled"] = true
+		details["sync_servers"] = len(m.syncServers)
+		details["last_sync_attempts"] = lastSyncTimes
+
+		// Check if any sync is very stale (> 2x sync interval)
+		staleSyncFound := false
+		m.lastSyncMu.RLock()
+		for _, lastAttempt := range m.lastSyncAttempt {
+			if time.Since(lastAttempt) > 2*m.syncInterval {
+				staleSyncFound = true
+				break
+			}
+		}
+		m.lastSyncMu.RUnlock()
+
+		if staleSyncFound {
+			return health.ComponentStatus{Status: "degraded", Details: details}
+		}
+	}
+
+	// Check if we're dropping events
+	if eventsDropped > 0 {
+		// Calculate drop rate
+		totalEvents := eventsProcessed + eventsDropped
+		dropRate := float64(eventsDropped) / float64(totalEvents) * 100.0
+		details["drop_rate_pct"] = dropRate
+
+		// Degraded if dropping any events
+		if dropRate > 1.0 {
+			// More than 1% drop rate is concerning
+			return health.ComponentStatus{Status: "unhealthy", Details: details}
+		} else {
+			return health.ComponentStatus{Status: "degraded", Details: details}
+		}
+	}
+
+	// Check channel utilization - warn if >80% full
+	if chanUtilization > 80.0 {
+		return health.ComponentStatus{Status: "degraded", Details: details}
+	}
+
+	return health.ComponentStatus{Status: "healthy", Details: details}
+}

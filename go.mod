@@ -7,9 +7,11 @@ require (
 	github.com/caddyserver/certmagic v0.23.0
 	github.com/emersion/go-msgauth v0.6.8
 	github.com/emersion/go-smtp v0.22.0
+	github.com/mileusna/spf v0.9.5
 	github.com/minio/minio-go/v7 v7.0.94
 	github.com/spf13/pflag v1.0.6
 	go.uber.org/zap v1.27.0
+	golang.org/x/net v0.38.0
 )
 
 require (
@@ -34,7 +36,6 @@ require (
 	go.uber.org/zap/exp v0.3.0 // indirect
 	golang.org/x/crypto v0.36.0 // indirect
 	golang.org/x/mod v0.24.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
 	golang.org/x/sync v0.12.0 // indirect
 	golang.org/x/sys v0.31.0 // indirect
 	golang.org/x/text v0.23.0 // indirect

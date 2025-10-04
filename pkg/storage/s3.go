@@ -35,6 +35,10 @@ type S3CertStorage struct {
 
 // NewS3CertStorage creates a new S3 certificate storage instance.
 func NewS3CertStorage(client *minio.Client, bucket, prefix string, logger *zap.Logger) *S3CertStorage {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
 	return &S3CertStorage{
 		client: client,
 		bucket: bucket,
