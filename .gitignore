@@ -1,1 +1,22 @@
-mizu
+./mizu-server
+./mizu-admin
+mizu-linux-amd64
+mizu-admin-linux-amd64
+mizu-freebsd-amd64
+mizu-admin-freebsd-amd64
+bin/*
+
+# Runtime files
+*.db
+*.db-*
+*.pid
+logs/*
+
+# Config (use config.toml.example as template)
+config.toml
+
+# Development
+*.pem
+*.key
+test-config.toml
+
