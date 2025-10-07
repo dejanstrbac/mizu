@@ -4,7 +4,7 @@ package config
 type Config struct {
 	SMTP        SMTPConfig        `toml:"smtp"`
 	DNS         DNSConfig         `toml:"dns"`
-	S3          S3Config          `toml:"s3"`
+	Storage     StorageConfig     `toml:"storage"`
 	Destination DestinationConfig `toml:"destination"`
 	TLS         TLSConfig         `toml:"tls"`
 	Blacklists  BlacklistsConfig  `toml:"blacklists"`
@@ -25,6 +25,8 @@ type SMTPConfig struct {
 	MinTLSVersion          string                  `toml:"min_tls_version"`          // Minimum TLS version: "1.2" or "1.3" (TLS 1.0/1.1 not supported)
 	CheckXSpamFlag         bool                    `toml:"check_x_spam_flag"`        // Enable check for X-Spam-Flag header
 	DMARCQuarantineAsJunk  bool                    `toml:"dmarc_quarantine_as_junk"` // Treat DMARC quarantine policy as junk
+	ARCEnabled             bool                    `toml:"arc_enabled"`              // Enable ARC (Authenticated Received Chain) validation (default: true)
+	ARCSign                ARCSignConfig           `toml:"arc_sign"`                 // ARC signing configuration
 	RequireSenderMX        bool                    `toml:"require_sender_mx"`        // Require sender domain to have MX records (default: true)
 	ShutdownTimeoutSeconds int                     `toml:"shutdown_timeout_seconds"` // Maximum time to wait for graceful shutdown in seconds (default: 60)
 	MaxConnections         int                     `toml:"max_connections"`          // Maximum total concurrent connections (0 = unlimited, default: 100)
@@ -47,6 +49,14 @@ type RateLimitDimension struct {
 	Keys          []string `toml:"keys"`           // Dimension keys to combine (IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN)
 	Limit         int      `toml:"limit"`          // Max connections/emails per window (0 = unlimited)
 	WindowSeconds int      `toml:"window_seconds"` // Time window for rate limiting in seconds (default: 60)
+}
+
+// ARCSignConfig holds configuration for ARC signing
+type ARCSignConfig struct {
+	Enabled        bool   `toml:"enabled"`          // Enable ARC signing (default: false)
+	Domain         string `toml:"domain"`           // Domain to sign with (e.g., "mail.example.com")
+	Selector       string `toml:"selector"`         // DKIM selector for ARC signatures (e.g., "arc")
+	PrivateKeyPath string `toml:"private_key_path"` // Path to RSA private key for signing (PEM format)
 }
 
 // DNSConfig holds DNS resolver configuration (global for all DNS operations)
@@ -76,14 +86,16 @@ type DistributedLimitsConfig struct {
 	RecipientCacheTTLSeconds int  `toml:"recipient_cache_ttl_seconds"` // How long to cache recipient validation results in seconds (default: 900 = 15m)
 }
 
-// S3Config holds S3 configuration for certificate storage
-type S3Config struct {
-	Endpoint        string `toml:"endpoint"`
-	Bucket          string `toml:"bucket"`
-	Prefix          string `toml:"prefix"`
-	AccessKeyID     string `toml:"access_key_id"`
-	SecretAccessKey string `toml:"secret_access_key"`
-	Region          string `toml:"region"`
+// StorageConfig holds configuration for object storage (S3 or filesystem)
+type StorageConfig struct {
+	Backend         string `toml:"backend"`           // Storage backend: "s3" or "filesystem" (default: "s3")
+	FilesystemPath  string `toml:"filesystem_path"`   // Path for filesystem backend (e.g., "/var/lib/mizu/storage")
+	Endpoint        string `toml:"endpoint"`          // S3 endpoint
+	Bucket          string `toml:"bucket"`            // S3 bucket name
+	Prefix          string `toml:"prefix"`            // S3 key prefix
+	AccessKeyID     string `toml:"access_key_id"`     // S3 access key
+	SecretAccessKey string `toml:"secret_access_key"` // S3 secret key
+	Region          string `toml:"region"`            // S3 region
 }
 
 // DestinationConfig holds configuration for the HTTP destination endpoint
@@ -154,17 +166,24 @@ type StatsConfig struct {
 func DefaultConfig() Config {
 	return Config{
 		SMTP: SMTPConfig{
-			ListenAddr:             ":25",              // Standard SMTP port
-			Domain:                 "mail.example.com", // Default domain
-			MaxMessageSize:         10 * 1024 * 1024,   // Default 10MB max message size
-			TimeoutSeconds:         10,                 // Default 10s SMTP timeout
-			MinTLSVersion:          "1.2",              // Default to TLS 1.2 minimum
-			CheckXSpamFlag:         true,               // Default to checking X-Spam-Flag header
-			DMARCQuarantineAsJunk:  true,               // Default to treating quarantine as junk
-			RequireSenderMX:        true,               // Default to requiring MX records
-			ShutdownTimeoutSeconds: 60,                 // Default 60s graceful shutdown
-			MaxConnections:         100,                // Default max 100 concurrent connections
-			MaxConnectionsPerIP:    10,                 // Default max 10 connections per IP
+			ListenAddr:            ":25",              // Standard SMTP port
+			Domain:                "mail.example.com", // Default domain
+			MaxMessageSize:        10 * 1024 * 1024,   // Default 10MB max message size
+			TimeoutSeconds:        10,                 // Default 10s SMTP timeout
+			MinTLSVersion:         "1.2",              // Default to TLS 1.2 minimum
+			CheckXSpamFlag:        true,               // Default to checking X-Spam-Flag header
+			DMARCQuarantineAsJunk: true,               // Default to treating quarantine as junk
+			ARCEnabled:            true,               // Default to ARC validation enabled
+			ARCSign: ARCSignConfig{
+				Enabled:        false,                       // Disabled by default
+				Domain:         "",                          // Must be configured
+				Selector:       "arc",                       // Default selector
+				PrivateKeyPath: "/etc/mizu/arc-private.pem", // Default key path
+			},
+			RequireSenderMX:        true, // Default to requiring MX records
+			ShutdownTimeoutSeconds: 60,   // Default 60s graceful shutdown
+			MaxConnections:         100,  // Default max 100 concurrent connections
+			MaxConnectionsPerIP:    10,   // Default max 10 connections per IP
 			RateLimit: RateLimitConfig{
 				Enabled:               true,  // Enabled by default
 				GossipEnabled:         false, // Disabled by default (requires cluster mode)
@@ -192,11 +211,13 @@ func DefaultConfig() Config {
 			CacheTTLSeconds:  300,        // Default 5m (300s) DNS cache TTL
 			CacheNegativeTTL: 60,         // Default 1m (60s) negative cache TTL
 		},
-		S3: S3Config{
-			Endpoint: "s3.amazonaws.com",
-			Bucket:   "email-mx-certs",
-			Prefix:   "certs/",
-			Region:   "us-east-1",
+		Storage: StorageConfig{
+			Backend:        "s3",                    // Default to S3
+			FilesystemPath: "/var/lib/mizu/storage", // Default filesystem path
+			Endpoint:       "s3.amazonaws.com",
+			Bucket:         "email-mx-certs",
+			Prefix:         "certs/",
+			Region:         "us-east-1",
 		},
 		Destination: DestinationConfig{
 			URL:                "https://your-worker.example.com/email",

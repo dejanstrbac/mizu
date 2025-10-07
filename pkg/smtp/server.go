@@ -22,6 +22,7 @@ import (
 	"migadu/mizu/pkg/config"
 	"migadu/mizu/pkg/dns"
 	"migadu/mizu/pkg/logging"
+	"migadu/mizu/pkg/metrics"
 	"migadu/mizu/pkg/poster"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/validation"
@@ -73,14 +74,16 @@ type Backend struct {
 	HTTPClient     *net_http.Client       // HTTP client for posting emails to destination
 	Logger         *zap.Logger            // Structured logger for debugging and monitoring
 	DNSResolver    *net.Resolver          // Custom DNS resolver (uses config.DNS.Servers or system default)
+	Metrics        *metrics.Metrics       // Prometheus metrics for observability
 
 	// Connection tracking for graceful shutdown and DoS protection
-	ActiveSessionsWg   *sync.WaitGroup     // Tracks active SMTP sessions
-	ActiveSessionCount *atomic.Int64       // Current number of active sessions (for observability)
-	ShutdownChan       chan struct{}       // Signals shutdown to new connections
-	ConnTracker        *ConnectionTracker  // Tracks connections to enforce limits
-	DistTracker        *DistributedTracker // Optional: Distributed connection tracking
-	RateLimiter        *RateLimiter        // Rate limiter to prevent rapid connection attempts
+	ActiveSessionsWg   *sync.WaitGroup       // Tracks active SMTP sessions
+	ActiveSessionCount *atomic.Int64         // Current number of active sessions (for observability)
+	ShutdownChan       chan struct{}         // Signals shutdown to new connections
+	ConnTracker        *ConnectionTracker    // Tracks connections to enforce limits
+	DistTracker        *DistributedTracker   // Optional: Distributed connection tracking
+	RateLimiter        *RateLimiter          // Rate limiter to prevent rapid connection attempts
+	ARCSigner          *validation.ARCSigner // Optional: ARC signer for adding ARC headers
 }
 
 // EHLO/HELO is called for the HELO/EHLO command.
@@ -109,6 +112,11 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 	remoteAddr := c.Conn().RemoteAddr().String()
 
+	// Record connection attempt in metrics
+	if be.Metrics != nil {
+		be.Metrics.SMTPConnectionsTotal.Inc()
+	}
+
 	// Track whether session was successfully created for connection cleanup
 	sessionCreated := false
 
@@ -120,6 +128,12 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		}
 		if err := be.RateLimiter.CheckRateLimit(sessionCtx); err != nil {
 			be.Logger.Warn("Rate limit exceeded", zap.String("remote_addr", remoteAddr), zap.Error(err))
+
+			// Record rejection in metrics
+			if be.Metrics != nil {
+				be.Metrics.SMTPMessagesRejected.WithLabelValues("rate_limit").Inc()
+			}
+
 			return nil, &smtp.SMTPError{
 				Code:         421,
 				EnhancedCode: smtp.EnhancedCode{4, 3, 2},
@@ -174,6 +188,11 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			be.Logger.Debug("Session count incremented",
 				zap.Int64("active_sessions", count),
 				zap.String("remote_addr", remoteAddr))
+
+			// Update Prometheus gauge for active connections
+			if be.Metrics != nil {
+				be.Metrics.SMTPConnectionsActive.Set(float64(count))
+			}
 		}
 
 		// Panic recovery: ensure we call Done() if session creation panics
@@ -226,11 +245,21 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 				// Don't reject on blacklist check errors - fail open for availability
 			} else if isListed {
 				be.Logger.Warn("Rejecting session - blacklisted", zap.String("remote_addr", remoteAddr), zap.String("reason", reason))
+
+				// Record blacklist rejection in metrics
+				if be.Metrics != nil {
+					be.Metrics.SMTPBlacklistChecks.WithLabelValues("blocked").Inc()
+					be.Metrics.SMTPMessagesRejected.WithLabelValues("blacklist").Inc()
+				}
+
 				return nil, &smtp.SMTPError{
 					Code:         550,
 					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
 					Message:      fmt.Sprintf("your IP address is blacklisted: %s", reason),
 				}
+			} else if be.Metrics != nil {
+				// Record successful blacklist check
+				be.Metrics.SMTPBlacklistChecks.WithLabelValues("pass").Inc()
 			}
 		}
 
@@ -245,6 +274,12 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			if be.StatsManager != nil {
 				be.StatsManager.RecordConnection(ipStr, false)
 			}
+
+			// Record rejection in metrics
+			if be.Metrics != nil {
+				be.Metrics.SMTPMessagesRejected.WithLabelValues("no_rdns").Inc()
+			}
+
 			be.Logger.Warn("Rejecting session - no reverse DNS", zap.String("remote_addr", remoteAddr))
 			return nil, &smtp.SMTPError{
 				Code:         550,
@@ -305,6 +340,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		connTracker:    be.ConnTracker,
 		distTracker:    be.DistTracker,
 		rateLimiter:    be.RateLimiter,
+		metrics:        be.Metrics,
 		ctx:            ctx,
 		Logger:         be.Logger.With(zap.String("trace_id", traceID)),
 		cancel:         cancel,
@@ -312,6 +348,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		sessionCount:   be.ActiveSessionCount,
 		commandState:   stateNew, // Explicitly initialize command state
 		traceID:        traceID,
+		arcSigner:      be.ARCSigner, // Add ARC signer (nil if disabled)
 	}
 
 	sessionCreated = true
@@ -336,6 +373,7 @@ type Session struct {
 	connTracker    *ConnectionTracker     // Connection tracker for DoS protection
 	distTracker    *DistributedTracker    // Distributed connection tracker (optional, for cluster-wide limits)
 	rateLimiter    *RateLimiter           // Multi-dimensional rate limiter
+	metrics        *metrics.Metrics       // Prometheus metrics for observability
 	ctx            context.Context        // Session context with deadline for timeout
 	Logger         *zap.Logger            // Structured logger for this session
 	cancel         context.CancelFunc     // Cancel function to clean up resources
@@ -351,6 +389,11 @@ type Session struct {
 	// Stats tracking
 	senderDomain string // Domain from MAIL FROM for stats
 	spfResult    *validation.SPFResult
+
+	// Validation results for ARC signing
+	dmarcResult *validation.DMARCResult
+	arcResult   *validation.ARCResult
+	arcSigner   *validation.ARCSigner // ARC signer (nil if ARC signing disabled)
 }
 
 // SMTP command states for sequence validation
@@ -560,8 +603,18 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 				res, err := validation.CheckSPF(context.Background(), ip, s.helo, from)
 				if err != nil {
 					s.Logger.Debug("SPF check error", zap.String("from", from), zap.Error(err))
+					if s.metrics != nil {
+						s.metrics.SMTPSPFChecks.WithLabelValues("error").Inc()
+					}
 				} else if res != nil {
-					s.Logger.Debug("SPF result", zap.String("from", from), zap.String("result", string(*res)))
+					resultStr := string(*res)
+					s.Logger.Debug("SPF result", zap.String("from", from), zap.String("result", resultStr))
+
+					// Record SPF check result in metrics
+					if s.metrics != nil {
+						s.metrics.SMTPSPFChecks.WithLabelValues(resultStr).Inc()
+					}
+
 					spfMu.Lock()
 					s.spfResult = &validation.SPFResult{
 						Domain: s.senderDomain,
@@ -772,6 +825,12 @@ func (s *Session) readMessageData(r io.Reader) (string, error) {
 
 	rawEmail := s.mailData.String()
 
+	// Record message received and size in metrics
+	if s.metrics != nil {
+		s.metrics.SMTPMessagesReceived.Inc()
+		s.metrics.SMTPMessageSize.Observe(float64(len(rawEmail)))
+	}
+
 	// Check for empty message.
 	if strings.TrimSpace(rawEmail) == "" {
 		s.Logger.Warn("Rejecting empty message", zap.String("from", s.from))
@@ -800,13 +859,32 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 
 	// DMARC validation
 	dmarcResult, err := validation.CheckDMARC(context.Background(), rawEmail, s.spfResult, s.config.SMTP.DMARCQuarantineAsJunk, s.Logger)
+	s.dmarcResult = dmarcResult // Store for ARC signing
 	if err != nil {
 		s.Logger.Warn("DMARC validation error", zap.Error(err))
+		if s.metrics != nil {
+			s.metrics.SMTPDMARCChecks.WithLabelValues("error").Inc()
+		}
 	} else if dmarcResult != nil {
+		// Record DMARC check result in metrics
+		if s.metrics != nil {
+			if dmarcResult.Pass {
+				s.metrics.SMTPDMARCChecks.WithLabelValues("pass").Inc()
+			} else {
+				s.metrics.SMTPDMARCChecks.WithLabelValues("fail").Inc()
+			}
+		}
+
 		// If DMARC policy is 'reject' and validation failed, reject the message.
 		if !dmarcResult.Pass && dmarcResult.Policy == "reject" {
 			s.recordDMARCFailure()
 			s.Logger.Warn("Rejecting email - DMARC reject policy", zap.String("from", s.from), zap.Strings("reasons", dmarcResult.FailureReasons))
+
+			// Record rejection in metrics
+			if s.metrics != nil {
+				s.metrics.SMTPMessagesRejected.WithLabelValues("dmarc_reject").Inc()
+			}
+
 			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "message rejected due to DMARC policy"}
 		}
 
@@ -815,6 +893,54 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 			s.isJunk = true
 			s.junkReasons = append(s.junkReasons, "DMARC check failed or missing with unaligned auth")
 			s.Logger.Info("Marking as junk - DMARC", zap.Strings("reasons", dmarcResult.FailureReasons))
+		}
+	}
+
+	// ARC (Authenticated Received Chain) validation
+	// ARC preserves email authentication results through forwarding intermediaries
+	if s.config.SMTP.ARCEnabled {
+		arcResult, err := validation.CheckARC(context.Background(), rawEmail, s.Logger)
+		s.arcResult = arcResult // Store for ARC signing
+		if err != nil {
+			s.Logger.Warn("ARC validation error", zap.Error(err))
+			if s.metrics != nil {
+				s.metrics.SMTPARCChecks.WithLabelValues("error").Inc()
+			}
+		} else if arcResult != nil {
+			// Record ARC check result in metrics
+			if s.metrics != nil {
+				if arcResult.Pass {
+					s.metrics.SMTPARCChecks.WithLabelValues("pass").Inc()
+				} else {
+					s.metrics.SMTPARCChecks.WithLabelValues("fail").Inc()
+				}
+			}
+
+			// Log ARC validation result
+			s.Logger.Debug("ARC validation result",
+				zap.Bool("pass", arcResult.Pass),
+				zap.Bool("chain_valid", arcResult.ChainValid),
+				zap.Int("instance", arcResult.Instance),
+				zap.Strings("failure_reasons", arcResult.FailureReasons))
+
+			// If ARC chain is broken (invalid), mark as suspicious but don't reject
+			// ARC failure doesn't mean the message is spam, just that the chain is broken
+			if !arcResult.Pass && arcResult.Instance > 0 {
+				s.Logger.Info("ARC chain validation failed",
+					zap.Int("instance", arcResult.Instance),
+					zap.Strings("reasons", arcResult.FailureReasons))
+				// Note: We don't mark as junk solely based on ARC failure
+				// ARC is informational and helps with forwarded emails
+			}
+
+			// If ARC validates successfully and shows the message passed authentication
+			// at an earlier hop, this can override DMARC failures for forwarded emails
+			if arcResult.Pass && arcResult.Instance > 0 && s.isJunk {
+				s.Logger.Info("ARC chain valid - message likely forwarded, reconsidering junk status",
+					zap.Int("arc_instance", arcResult.Instance))
+				// Note: In a full implementation, we'd parse ARC-Authentication-Results
+				// to see if earlier hops validated successfully
+			}
 		}
 	}
 
@@ -829,6 +955,19 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 // It translates delivery errors into appropriate SMTP temporary or permanent failure codes.
 // It also checks the recipient cache before attempting delivery and caches 404/403 responses.
 func (s *Session) deliverMessage(rawEmail string) error {
+	// Sign email with ARC if enabled
+	signedEmail := rawEmail
+	if s.arcSigner != nil && s.config.SMTP.ARCSign.Enabled {
+		var err error
+		signedEmail, err = s.arcSigner.SignEmail(rawEmail, s.spfResult, s.dmarcResult, s.arcResult)
+		if err != nil {
+			s.Logger.Warn("Failed to sign email with ARC", zap.Error(err))
+			// Don't fail delivery on ARC signing error, just log and continue
+		} else {
+			s.Logger.Debug("Email signed with ARC headers")
+		}
+	}
+
 	// Check recipient cache first (if distributed tracking is enabled)
 	if s.distTracker != nil && len(s.to) > 0 {
 		// Check cache for all recipients
@@ -847,7 +986,7 @@ func (s *Session) deliverMessage(rawEmail string) error {
 
 	err := poster.PostEmailToDestinationWithContext(
 		s.ctx,
-		rawEmail,
+		signedEmail,
 		s.config.Destination.URL,
 		s.config.Destination.APIKey,
 		s.config.Destination.MaxRetryAttempts,

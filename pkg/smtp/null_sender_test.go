@@ -43,7 +43,7 @@ func TestMail_NullSenderRejection(t *testing.T) {
 				Timeout:          30 * time.Second,
 				SuccessThreshold: 3,
 			}
-			cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop())
+			cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop(), nil)
 
 			session := &Session{
 				conn:           (*smtp.Conn)(nil),  // Set to nil, we'll bypass by setting helo directly
@@ -105,7 +105,7 @@ func TestMail_NullSenderPreventsBackscatter(t *testing.T) {
 		Timeout:          30 * time.Second,
 		SuccessThreshold: 3,
 	}
-	cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop())
+	cb := poster.NewCircuitBreaker(cbConfig, zap.NewNop(), nil)
 
 	session := &Session{
 		conn:           (*smtp.Conn)(nil), // Set to nil, we'll bypass by setting helo directly

@@ -27,6 +27,7 @@ import (
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/storage"
 	tlsmgr "migadu/mizu/pkg/tls"
+	"migadu/mizu/pkg/validation"
 
 	"github.com/caddyserver/certmagic"
 	gosmtp "github.com/emersion/go-smtp"
@@ -90,7 +91,7 @@ func main() {
 	statsManager := initStatsManager(cfg, logger)
 
 	// Initialize Prometheus metrics
-	_ = metrics.New("mizu")
+	metricsInstance := metrics.New("mizu")
 	logger.Info("Prometheus metrics initialized")
 
 	var tlsConfig *tls.Config
@@ -128,7 +129,7 @@ func main() {
 			})
 		}
 	}
-	circuitBreaker := initCircuitBreaker(cfg, logger)
+	circuitBreaker := initCircuitBreaker(cfg, logger, metricsInstance)
 
 	// Create HTTP client with configured timeout for posting emails to destination
 	httpClient := poster.NewHTTPClient(time.Duration(cfg.Destination.HTTPTimeoutSeconds) * time.Second)
@@ -156,8 +157,8 @@ func main() {
 		distTracker = smtp.NewDistributedTracker(
 			connTracker,
 			s3Client,
-			cfg.S3.Bucket,
-			cfg.S3.Prefix,
+			cfg.Storage.Bucket,
+			cfg.Storage.Prefix,
 			smtp.DistributedConfig{
 				Hostname:          nodeName,
 				Cluster:           clusterMgr, // Pass memberlist cluster
@@ -221,6 +222,32 @@ func main() {
 		}
 	}
 
+	// Initialize ARC signer if enabled
+	var arcSigner *validation.ARCSigner
+	if cfg.SMTP.ARCSign.Enabled {
+		// Use config domain if ARC sign domain is not set
+		arcDomain := cfg.SMTP.ARCSign.Domain
+		if arcDomain == "" {
+			arcDomain = cfg.SMTP.Domain
+		}
+
+		var err error
+		arcSigner, err = validation.NewARCSigner(
+			arcDomain,
+			cfg.SMTP.ARCSign.Selector,
+			cfg.SMTP.ARCSign.PrivateKeyPath,
+			logger,
+		)
+		if err != nil {
+			logger.Fatal("Failed to initialize ARC signer",
+				zap.Error(err),
+				zap.String("private_key_path", cfg.SMTP.ARCSign.PrivateKeyPath))
+		}
+		logger.Info("ARC signing enabled",
+			zap.String("domain", arcDomain),
+			zap.String("selector", cfg.SMTP.ARCSign.Selector))
+	}
+
 	// Create the backend that handles SMTP protocol logic with connection tracking
 	var activeSessionsWg sync.WaitGroup
 	var activeSessionCount atomic.Int64
@@ -235,10 +262,12 @@ func main() {
 		ConnTracker:        connTracker,
 		DistTracker:        distTracker,
 		RateLimiter:        rateLimiter,
+		Metrics:            metricsInstance,
 		Logger:             logger,
 		ActiveSessionsWg:   &activeSessionsWg,
 		ActiveSessionCount: &activeSessionCount,
 		ShutdownChan:       shutdownChan,
+		ARCSigner:          arcSigner, // Add ARC signer (nil if disabled)
 	}
 
 	// Run the SMTP server and wait for it to complete
@@ -309,41 +338,85 @@ func initStatsManager(cfg *config.Config, logger *zap.Logger) *stats.Manager {
 	return statsManager
 }
 
-// initTLS sets up the S3 client and TLS certificate management (autocert or certmagic).
-func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *zap.Logger) (*tls.Config, *minio.Client, *tlsmgr.Manager, error) {
-	// Initialize S3 client for MinIO (S3-compatible)
-	s3Client, err := minio.New(cfg.S3.Endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(cfg.S3.AccessKeyID, cfg.S3.SecretAccessKey, ""),
-		Region: cfg.S3.Region,
-		Secure: true, // Use HTTPS
-	})
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to init S3 client: %w", err)
-	}
-
-	// Validate S3 credentials early by checking bucket access
-	// This fails fast on startup rather than during certificate operations
-	logger.Sugar().Infof("Validating S3 access to bucket '%s'...", cfg.S3.Bucket)
+// initStorageBackend initializes the storage backend based on configuration (S3 or filesystem)
+func initStorageBackend(cfg *config.Config, logger *zap.Logger) (storage.Backend, *minio.Client, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	exists, err := s3Client.BucketExists(ctx, cfg.S3.Bucket)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to validate S3 credentials/access: %w (check S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY)", err)
-	}
-	if !exists {
-		// Bucket doesn't exist - try to create it
-		logger.Sugar().Infof("Bucket '%s' does not exist, attempting to create it...", cfg.S3.Bucket)
-		err = s3Client.MakeBucket(ctx, cfg.S3.Bucket, minio.MakeBucketOptions{
-			Region: cfg.S3.Region,
+	var backend storage.Backend
+	var s3Client *minio.Client
+
+	switch cfg.Storage.Backend {
+	case "filesystem":
+		logger.Info("Using filesystem storage backend", zap.String("path", cfg.Storage.FilesystemPath))
+		fsBackend, err := storage.NewFilesystemBackend(cfg.Storage.FilesystemPath, logger)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to init filesystem backend: %w", err)
+		}
+
+		// Ensure storage directory exists
+		exists, err := fsBackend.BucketExists(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to check storage directory: %w", err)
+		}
+		if !exists {
+			logger.Info("Creating storage directory", zap.String("path", cfg.Storage.FilesystemPath))
+			if err := fsBackend.MakeBucket(ctx); err != nil {
+				return nil, nil, fmt.Errorf("failed to create storage directory: %w", err)
+			}
+		}
+
+		backend = fsBackend
+
+	case "s3":
+		logger.Info("Using S3 storage backend", zap.String("bucket", cfg.Storage.Bucket))
+		// Initialize S3 client for MinIO (S3-compatible)
+		var err error
+		s3Client, err = minio.New(cfg.Storage.Endpoint, &minio.Options{
+			Creds:  credentials.NewStaticV4(cfg.Storage.AccessKeyID, cfg.Storage.SecretAccessKey, ""),
+			Region: cfg.Storage.Region,
+			Secure: true, // Use HTTPS
 		})
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("S3 bucket '%s' does not exist and could not be created: %w (ensure credentials have s3:CreateBucket permission)", cfg.S3.Bucket, err)
+			return nil, nil, fmt.Errorf("failed to init S3 client: %w", err)
 		}
-		logger.Sugar().Infof("Successfully created S3 bucket '%s'", cfg.S3.Bucket)
-	} else {
-		logger.Sugar().Infof("Successfully validated S3 access to bucket '%s'", cfg.S3.Bucket)
+
+		s3Backend := storage.NewS3Backend(s3Client, cfg.Storage.Bucket, logger)
+
+		// Validate S3 credentials early by checking bucket access
+		logger.Sugar().Infof("Validating S3 access to bucket '%s'...", cfg.Storage.Bucket)
+		exists, err := s3Backend.BucketExists(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to validate S3 credentials/access: %w (check S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY)", err)
+		}
+		if !exists {
+			// Bucket doesn't exist - try to create it
+			logger.Sugar().Infof("Bucket '%s' does not exist, attempting to create it...", cfg.Storage.Bucket)
+			if err := s3Backend.MakeBucket(ctx); err != nil {
+				return nil, nil, fmt.Errorf("S3 bucket '%s' does not exist and could not be created: %w (ensure credentials have s3:CreateBucket permission)", cfg.Storage.Bucket, err)
+			}
+			logger.Sugar().Infof("Successfully created S3 bucket '%s'", cfg.Storage.Bucket)
+		} else {
+			logger.Sugar().Infof("Successfully validated S3 access to bucket '%s'", cfg.Storage.Bucket)
+		}
+
+		backend = s3Backend
+
+	default:
+		return nil, nil, fmt.Errorf("invalid storage backend: %s", cfg.Storage.Backend)
 	}
+
+	return backend, s3Client, nil
+}
+
+// initTLS sets up the storage backend and TLS certificate management (autocert or certmagic).
+func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *zap.Logger) (*tls.Config, *minio.Client, *tlsmgr.Manager, error) {
+	storageBackend, s3Client, err := initStorageBackend(cfg, logger)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	_ = storageBackend // TODO: Update TLS manager to use storage abstraction
 
 	var tlsConfig *tls.Config
 	var tlsMgr *tlsmgr.Manager
@@ -368,8 +441,8 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *zap.Logger
 			Email:     cfg.TLS.Email,
 			Domains:   cfg.TLS.Domains,
 			S3Client:  s3Client,
-			S3Bucket:  cfg.S3.Bucket,
-			S3Prefix:  cfg.S3.Prefix,
+			S3Bucket:  cfg.Storage.Bucket,
+			S3Prefix:  cfg.Storage.Prefix,
 			IsLeaderF: isLeaderF,
 			Staging:   !cfg.TLS.UseProduction,
 		}, logger)
@@ -393,7 +466,7 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *zap.Logger
 		}
 
 		// Set up Certmagic storage to use S3
-		certmagic.Default.Storage = storage.NewS3CertStorage(s3Client, cfg.S3.Bucket, cfg.S3.Prefix, logger)
+		certmagic.Default.Storage = storage.NewS3CertStorage(s3Client, cfg.Storage.Bucket, cfg.Storage.Prefix, logger)
 
 		// Configure Certmagic for ACME (Let's Encrypt)
 		if cfg.TLS.Email != "" {
@@ -431,7 +504,7 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *zap.Logger
 }
 
 // initCircuitBreaker initializes the circuit breaker for the destination endpoint.
-func initCircuitBreaker(cfg *config.Config, logger *zap.Logger) *poster.CircuitBreaker {
+func initCircuitBreaker(cfg *config.Config, logger *zap.Logger, metricsInstance *metrics.Metrics) *poster.CircuitBreaker {
 	if cfg.Local || !cfg.Destination.CircuitBreaker.Enabled {
 		return nil
 	}
@@ -443,7 +516,7 @@ func initCircuitBreaker(cfg *config.Config, logger *zap.Logger) *poster.CircuitB
 		Timeout:          time.Duration(cfg.Destination.CircuitBreaker.TimeoutSeconds) * time.Second,
 		HalfOpenMaxCalls: cfg.Destination.CircuitBreaker.HalfOpenMaxCalls,
 		ResetTimeout:     time.Duration(cfg.Destination.CircuitBreaker.ResetTimeoutSeconds) * time.Second,
-	}, logger)
+	}, logger, metricsInstance)
 	logger.Sugar().Infof("Circuit breaker enabled: failure_threshold=%d, timeout=%v",
 		cfg.Destination.CircuitBreaker.FailureThreshold,
 		time.Duration(cfg.Destination.CircuitBreaker.TimeoutSeconds)*time.Second)
@@ -526,7 +599,7 @@ func startHealthServer(cfg *config.Config, logger *zap.Logger, statsManager *sta
 		checkers = append(checkers, connTracker)
 	}
 	if s3Client != nil {
-		checkers = append(checkers, health.NewCheckS3Connection(s3Client, cfg.S3.Bucket))
+		checkers = append(checkers, health.NewCheckS3Connection(s3Client, cfg.Storage.Bucket))
 	}
 	if !cfg.Local && cfg.Destination.URL != "" {
 		checkers = append(checkers, health.NewCheckDestination(cfg.Destination.URL, 5*time.Second))
@@ -588,13 +661,13 @@ func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *min
 
 	// Start export loop
 	logging.SafeGo(logger, "stats-export-loop", func() {
-		statsMgr.StartExportLoop(ctx, s3Client, cfg.S3.Bucket, cfg.S3.Prefix,
+		statsMgr.StartExportLoop(ctx, s3Client, cfg.Storage.Bucket, cfg.Storage.Prefix,
 			hostname, time.Duration(cfg.Stats.SyncIntervalSeconds)*time.Second)
 	})
 
 	// Start sync loop
 	logging.SafeGo(logger, "stats-sync-loop", func() {
-		statsMgr.StartSyncLoop(ctx, s3Client, cfg.S3.Bucket, cfg.S3.Prefix,
+		statsMgr.StartSyncLoop(ctx, s3Client, cfg.Storage.Bucket, cfg.Storage.Prefix,
 			time.Duration(cfg.Stats.SyncIntervalSeconds)*time.Second)
 	})
 }

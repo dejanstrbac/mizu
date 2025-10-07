@@ -1,17 +1,28 @@
-.PHONY: all clean build mizu mizu-admin install test 
+# ====================================================================================
+# Makefile for Mizu
+#
+# This Makefile provides a set of targets to build, test, and manage the Mizu
+# application and its related tools. It includes support for cross-compilation
+# and version injection.
+# ====================================================================================
 
-# Binary names - can be overridden by environment variables
-mizu_BINARY ?= mizu-server
-mizu_ADMIN_BINARY ?= mizu-admin
-mizu_LINUX_BINARY ?= mizu-linux-amd64
-mizu_ADMIN_LINUX_BINARY ?= mizu-admin-linux-amd64
-mizu_FREEBSD_BINARY ?= mizu-freebsd-amd64
-mizu_ADMIN_FREEBSD_BINARY ?= mizu-admin-freebsd-amd64
+# Phony targets are not actual files, but commands to be executed.
+.PHONY: all build clean install test coverage linux-musl freebsd help
 
 # ====================================================================================
+# Variables
+# ====================================================================================
+
+# Binary names
+MIZU_SERVER_BINARY ?= mizu-server
+MIZU_ADMIN_BINARY ?= mizu-admin
+
+# Get all .go files recursively
+GO_FILES := $(shell find . -type f -name '*.go')
+
 # Version Information
-# You can override these variables during the build, e.g., make build VERSION=v1.0.0
-# ====================================================================================
+# These variables are used to inject version information into the binaries.
+# They can be overridden during the build process, e.g., make build VERSION=v1.0.0
 VERSION ?= $(shell git describe --tags --always --dirty --match='v*')
 COMMIT ?= $(shell git rev-parse --short HEAD)
 DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -20,44 +31,90 @@ DATE ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS_VARS = -X 'main.version=${VERSION}' -X 'main.commit=${COMMIT}' -X 'main.date=${DATE}'
 LDFLAGS = -ldflags="${LDFLAGS_VARS}"
 
-# Default target
+# ====================================================================================
+# Default Target
+# ====================================================================================
+
 all: build
 
-# Build both executables
-build: mizu-server mizu-admin
+# ====================================================================================
+# Build Targets
+# ====================================================================================
 
-# Build the main mizu server
-mizu-server:
-	go build $(LDFLAGS) -o $(mizu_BINARY) ./cmd/mizu-server
+build: bin/$(MIZU_SERVER_BINARY) bin/$(MIZU_ADMIN_BINARY)
 
-# Build the mizu-admin tool
-mizu-admin:
-	go build $(LDFLAGS) -o $(mizu_ADMIN_BINARY) ./cmd/mizu-admin
+# Rule to build a Go binary.
+# Usage: make build-binary CMD_PATH=./cmd/mizu-server BINARY_NAME=mizu-server
+define build-binary
+	@echo "Building $(2)..."
+	@go build $(LDFLAGS) -o ./bin/$(2) $(1)
+endef
 
-# Install both executables to GOPATH/bin
+bin/$(MIZU_SERVER_BINARY): $(GO_FILES)
+	$(call build-binary,./cmd/mizu-server,$(MIZU_SERVER_BINARY))
+
+bin/$(MIZU_ADMIN_BINARY): $(GO_FILES)
+	$(call build-binary,./cmd/mizu-admin,$(MIZU_ADMIN_BINARY))
+
+# ====================================================================================
+# Installation and Cleaning
+# ====================================================================================
+
 install:
-	go install ./cmd/mizu-server
-	go install ./cmd/mizu-admin
+	@echo "Installing binaries to GOPATH/bin..."
+	@go install ./cmd/mizu-server
+	@go install ./cmd/mizu-admin
 
-# Clean build artifacts
 clean:
-	rm -f $(mizu_BINARY) $(mizu_ADMIN_BINARY) $(mizu_LINUX_BINARY) $(mizu_ADMIN_LINUX_BINARY) $(mizu_FREEBSD_BINARY) $(mizu_ADMIN_FREEBSD_BINARY)
+	@echo "Cleaning build artifacts..."
+	@rm -f ./bin/*
 
-# Run tests
+# ====================================================================================
+# Testing
+# ====================================================================================
+
 test:
-	go test -v ./...
+	@echo "Running tests..."
+	@go test -v ./...
 
-# Run tests with coverage
 coverage:
-	go test -coverprofile=coverage.out ./...
-	go tool cover -html=coverage.out
+	@echo "Running tests with coverage..."
+	@go test -coverprofile=coverage.out ./...
+	@go tool cover -html=coverage.out
 
-# Cross-compile with musl libc for Linux
+# ====================================================================================
+# Cross-Compilation
+# ====================================================================================
+
+# Rule to cross-compile a Go binary.
+# Usage: make cross-compile GOOS=linux GOARCH=amd64 CMD_PATH=./cmd/mizu-server BINARY_NAME=mizu-server-linux-amd64
+define cross-compile
+	@echo "Cross-compiling $(4) for $(1)/$(2)..."
+	@GOOS=$(1) GOARCH=$(2) $(3) go build $(LDFLAGS) -o ./bin/$(4) $(5)
+endef
+
 linux-musl:
-	CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++ GOARCH=amd64 GOOS=linux go build -ldflags="${LDFLAGS_VARS} -extldflags -static" -o $(mizu_LINUX_BINARY) ./cmd/mizu-server
-	CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++ GOARCH=amd64 GOOS=linux go build -ldflags="${LDFLAGS_VARS} -extldflags -static" -o $(mizu_ADMIN_LINUX_BINARY) ./cmd/mizu-admin
+	$(call cross-compile,linux,amd64,CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++,$(MIZU_SERVER_BINARY)-linux-amd64,./cmd/mizu-server)
+	$(call cross-compile,linux,amd64,CC=x86_64-linux-musl-gcc CXX=x86_64-linux-musl-g++,$(MIZU_ADMIN_BINARY)-linux-amd64,./cmd/mizu-admin)
 
-# Cross-compile for FreeBSD
 freebsd:
-	GOARCH=amd64 GOOS=freebsd go build $(LDFLAGS) -o $(mizu_FREEBSD_BINARY) ./cmd/mizu-server
-	GOARCH=amd64 GOOS=freebsd go build $(LDFLAGS) -o $(mizu_ADMIN_FREEBSD_BINARY) ./cmd/mizu-admin
+	$(call cross-compile,freebsd,amd64,,$(MIZU_SERVER_BINARY)-freebsd-amd64,./cmd/mizu-server)
+	$(call cross-compile,freebsd,amd64,,$(MIZU_ADMIN_BINARY)-freebsd-amd64,./cmd/mizu-admin)
+
+# ====================================================================================
+# Help Target
+# ====================================================================================
+
+help:
+	@echo "Usage: make [target]"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all              Build all binaries"
+	@echo "  build            Build both the mizu-server and mizu-admin binaries"
+	@echo "  install          Install both executables to GOPATH/bin"
+	@echo "  clean            Clean build artifacts"
+	@echo "  test             Run all tests"
+	@echo "  coverage         Run tests and generate a coverage report"
+	@echo "  linux-musl       Cross-compile with musl libc for a static Linux binary"
+	@echo "  freebsd          Cross-compile for FreeBSD"
+	@echo "  help             Display this help message"

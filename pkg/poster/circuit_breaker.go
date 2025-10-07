@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"migadu/mizu/pkg/health"
+	"migadu/mizu/pkg/metrics"
 
 	"go.uber.org/zap"
 )
@@ -45,8 +46,9 @@ type CircuitBreaker struct {
 	lastStateChange  time.Time
 	halfOpenCalls    int
 
-	// Logging
-	logger *zap.Logger
+	// Logging and metrics
+	logger  *zap.Logger
+	metrics *metrics.Metrics
 }
 
 // CircuitBreakerConfig holds configuration for the circuit breaker
@@ -60,7 +62,7 @@ type CircuitBreakerConfig struct {
 }
 
 // NewCircuitBreaker creates a new circuit breaker with the given configuration
-func NewCircuitBreaker(config CircuitBreakerConfig, logger *zap.Logger) *CircuitBreaker {
+func NewCircuitBreaker(config CircuitBreakerConfig, logger *zap.Logger, metrics *metrics.Metrics) *CircuitBreaker {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -82,7 +84,7 @@ func NewCircuitBreaker(config CircuitBreakerConfig, logger *zap.Logger) *Circuit
 		config.ResetTimeout = 60 * time.Second
 	}
 
-	return &CircuitBreaker{
+	cb := &CircuitBreaker{
 		failureThreshold: config.FailureThreshold,
 		successThreshold: config.SuccessThreshold,
 		timeout:          config.Timeout,
@@ -91,7 +93,13 @@ func NewCircuitBreaker(config CircuitBreakerConfig, logger *zap.Logger) *Circuit
 		state:            StateClosed,
 		lastStateChange:  time.Now(),
 		logger:           logger,
+		metrics:          metrics,
 	}
+
+	// Initialize metrics state
+	cb.updateMetricsState()
+
+	return cb
 }
 
 // Call executes the given function through the circuit breaker.
@@ -99,6 +107,10 @@ func NewCircuitBreaker(config CircuitBreakerConfig, logger *zap.Logger) *Circuit
 func (cb *CircuitBreaker) Call(fn func() error) error {
 	// Check if we can proceed with the call
 	if !cb.canProceed() {
+		// Record rejection in metrics
+		if cb.metrics != nil {
+			cb.metrics.CircuitBreakerRejects.Inc()
+		}
 		return ErrCircuitOpen
 	}
 
@@ -133,6 +145,7 @@ func (cb *CircuitBreaker) canProceed() bool {
 			cb.lastStateChange = now
 			cb.halfOpenCalls = 0
 			cb.successCount = 0
+			cb.updateMetricsState()
 			return true
 		}
 		return false
@@ -162,6 +175,11 @@ func (cb *CircuitBreaker) recordResult(err error) {
 		cb.consecutiveFails++
 		cb.lastFailureTime = now
 
+		// Record failure in metrics
+		if cb.metrics != nil {
+			cb.metrics.CircuitBreakerFailures.Inc()
+		}
+
 		switch cb.state {
 		case StateClosed:
 			// Check if we should open the circuit
@@ -169,6 +187,7 @@ func (cb *CircuitBreaker) recordResult(err error) {
 				cb.logger.Warn("Circuit breaker transitioning from Closed to Open", zap.Int("failures", cb.consecutiveFails))
 				cb.state = StateOpen
 				cb.lastStateChange = now
+				cb.updateMetricsState()
 			}
 
 		case StateHalfOpen:
@@ -178,11 +197,17 @@ func (cb *CircuitBreaker) recordResult(err error) {
 			cb.lastStateChange = now
 			cb.halfOpenCalls = 0
 			cb.successCount = 0
+			cb.updateMetricsState()
 		}
 	} else {
 		// Success
 		cb.successCount++
 		cb.consecutiveFails = 0 // Reset consecutive failure counter
+
+		// Record success in metrics
+		if cb.metrics != nil {
+			cb.metrics.CircuitBreakerSuccesses.Inc()
+		}
 
 		switch cb.state {
 		case StateHalfOpen:
@@ -197,6 +222,7 @@ func (cb *CircuitBreaker) recordResult(err error) {
 				cb.lastStateChange = now
 				cb.failureCount = 0
 				cb.successCount = 0
+				cb.updateMetricsState()
 			}
 
 		case StateClosed:
@@ -280,5 +306,28 @@ func (cb *CircuitBreaker) CheckHealth() health.ComponentStatus {
 	return health.ComponentStatus{
 		Status:  status,
 		Details: stats,
+	}
+}
+
+// updateMetricsState updates Prometheus metrics to reflect current circuit breaker state
+// Must be called while holding cb.mu lock
+func (cb *CircuitBreaker) updateMetricsState() {
+	if cb.metrics == nil {
+		return
+	}
+
+	// Reset all state gauges to 0
+	cb.metrics.CircuitBreakerState.WithLabelValues("closed").Set(0)
+	cb.metrics.CircuitBreakerState.WithLabelValues("open").Set(0)
+	cb.metrics.CircuitBreakerState.WithLabelValues("half_open").Set(0)
+
+	// Set current state to 1
+	switch cb.state {
+	case StateClosed:
+		cb.metrics.CircuitBreakerState.WithLabelValues("closed").Set(1)
+	case StateOpen:
+		cb.metrics.CircuitBreakerState.WithLabelValues("open").Set(1)
+	case StateHalfOpen:
+		cb.metrics.CircuitBreakerState.WithLabelValues("half_open").Set(1)
 	}
 }

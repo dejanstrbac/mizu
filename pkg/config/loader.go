@@ -30,12 +30,12 @@ func LoadConfig(args []string) (*Config, error) {
 	fs.BoolVar(&cfg.SMTP.DMARCQuarantineAsJunk, "smtp.dmarc-quarantine-as-junk", cfg.SMTP.DMARCQuarantineAsJunk, "Treat DMARC quarantine policy as junk")
 
 	// S3 flags
-	fs.StringVar(&cfg.S3.Endpoint, "s3.endpoint", cfg.S3.Endpoint, "S3 endpoint")
-	fs.StringVar(&cfg.S3.Bucket, "s3.bucket", cfg.S3.Bucket, "S3 bucket name")
-	fs.StringVar(&cfg.S3.Prefix, "s3.prefix", cfg.S3.Prefix, "S3 key prefix")
-	fs.StringVar(&cfg.S3.Region, "s3.region", cfg.S3.Region, "S3 region")
-	fs.StringVar(&cfg.S3.AccessKeyID, "s3.access-key-id", cfg.S3.AccessKeyID, "S3 access key ID (prefer env var for security)")
-	fs.StringVar(&cfg.S3.SecretAccessKey, "s3.secret-access-key", cfg.S3.SecretAccessKey, "S3 secret access key (prefer env var for security)")
+	fs.StringVar(&cfg.Storage.Endpoint, "s3.endpoint", cfg.Storage.Endpoint, "S3 endpoint")
+	fs.StringVar(&cfg.Storage.Bucket, "s3.bucket", cfg.Storage.Bucket, "S3 bucket name")
+	fs.StringVar(&cfg.Storage.Prefix, "s3.prefix", cfg.Storage.Prefix, "S3 key prefix")
+	fs.StringVar(&cfg.Storage.Region, "s3.region", cfg.Storage.Region, "S3 region")
+	fs.StringVar(&cfg.Storage.AccessKeyID, "s3.access-key-id", cfg.Storage.AccessKeyID, "S3 access key ID (prefer env var for security)")
+	fs.StringVar(&cfg.Storage.SecretAccessKey, "s3.secret-access-key", cfg.Storage.SecretAccessKey, "S3 secret access key (prefer env var for security)")
 
 	// Destination flags
 	fs.StringVar(&cfg.Destination.URL, "destination.url", cfg.Destination.URL, "Destination URL")
@@ -126,13 +126,13 @@ func loadTOMLConfig(filename string, cfg *Config) error {
 func loadEnvVars(cfg *Config) {
 	// S3 credentials
 	if v := os.Getenv("S3_ACCESS_KEY_ID"); v != "" {
-		cfg.S3.AccessKeyID = v
+		cfg.Storage.AccessKeyID = v
 	}
 	if v := os.Getenv("S3_SECRET_ACCESS_KEY"); v != "" {
-		cfg.S3.SecretAccessKey = v
+		cfg.Storage.SecretAccessKey = v
 	}
 	if v := os.Getenv("S3_ENDPOINT"); v != "" {
-		cfg.S3.Endpoint = v
+		cfg.Storage.Endpoint = v
 	}
 
 	// Destination credentials
@@ -159,16 +159,16 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("SMTP domain must be configured")
 	}
 
-	if cfg.S3.Bucket == "" {
+	if cfg.Storage.Bucket == "" {
 		return fmt.Errorf("S3 bucket must be configured")
 	}
 
 	// Check S3 credentials
-	if cfg.S3.AccessKeyID == "" {
+	if cfg.Storage.AccessKeyID == "" {
 		return fmt.Errorf("S3 access key ID must be configured (via config file, flag, or S3_ACCESS_KEY_ID env var)")
 	}
 
-	if cfg.S3.SecretAccessKey == "" {
+	if cfg.Storage.SecretAccessKey == "" {
 		return fmt.Errorf("S3 secret access key must be configured (via config file, flag, or S3_SECRET_ACCESS_KEY env var)")
 	}
 
@@ -191,8 +191,8 @@ func SaveExample(filename string) error {
 	cfg.TLS.Email = "admin@example.com"
 	cfg.Destination.URL = "https://your-worker.example.com/email"
 	cfg.Destination.APIKey = "your-api-key-here"
-	cfg.S3.AccessKeyID = "your-s3-access-key-id"
-	cfg.S3.SecretAccessKey = "your-s3-secret-access-key"
+	cfg.Storage.AccessKeyID = "your-s3-access-key-id"
+	cfg.Storage.SecretAccessKey = "your-s3-secret-access-key"
 
 	// Create directory if needed
 	dir := filepath.Dir(filename)

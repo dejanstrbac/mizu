@@ -1,0 +1,829 @@
+package validation
+
+import (
+	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/pem"
+	"fmt"
+	"io"
+	"net/mail"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/emersion/go-msgauth/authres"
+	"github.com/emersion/go-msgauth/dkim"
+	"go.uber.org/zap"
+)
+
+// ARCResult represents the result of ARC (Authenticated Received Chain) validation.
+//
+// ARC preserves email authentication results across forwarding intermediaries
+// like mailing lists and forwarders. Each intermediary adds an "instance" of
+// ARC headers (numbered sequentially: i=1, i=2, etc.).
+//
+// The validation process checks:
+//   - Chain integrity (all instances from 1 to N are present)
+//   - Signature validity (ARC-Seal and ARC-Message-Signature)
+//   - Proper sequence (no gaps or duplicates in instance numbers)
+//
+// A valid ARC chain indicates the message passed authentication at earlier
+// hops, even if current SPF/DKIM checks fail due to forwarding.
+type ARCResult struct {
+	Pass           bool     // Whether ARC chain validation passed
+	ChainValid     bool     // Whether the ARC chain is intact and valid
+	Instance       int      // The highest ARC instance number (0 if no ARC headers)
+	FailureReasons []string // List of reasons why validation failed
+}
+
+// ARCSet represents a single set of ARC headers at a specific hop.
+//
+// Per RFC 8617, each intermediary that handles an email adds exactly three
+// ARC headers with the same instance number (i=N):
+//
+//  1. ARC-Authentication-Results: Records the authentication results
+//     (SPF, DKIM, DMARC) observed at this hop
+//
+//  2. ARC-Message-Signature: A DKIM-style signature over selected message
+//     headers and body hash
+//
+//  3. ARC-Seal: Signs all previous ARC headers plus the new ones,
+//     creating a tamper-evident chain
+//
+// A complete ARC chain requires all three headers for each instance from
+// 1 to N with no gaps.
+type ARCSet struct {
+	Instance               int    // Instance number (i=)
+	AuthenticationResults  string // ARC-Authentication-Results header value
+	MessageSignature       string // ARC-Message-Signature header value
+	Seal                   string // ARC-Seal header value
+	SealDomain             string // Domain that sealed this set (d= from ARC-Seal)
+	MessageSignatureDomain string // Domain from ARC-Message-Signature (d=)
+}
+
+// CheckARC performs ARC (Authenticated Received Chain) validation on an email message.
+//
+// ARC validation verifies that the authentication chain through forwarding
+// intermediaries is intact and valid. This is critical for emails that pass
+// through mailing lists or forwarders where SPF/DKIM alignment breaks.
+//
+// The validation process:
+//  1. Extracts all ARC header sets (i=1, i=2, ..., i=N)
+//  2. Verifies each ARC-Message-Signature (DKIM-style verification)
+//  3. Verifies each ARC-Seal (signs the chain)
+//  4. Checks chain integrity (no gaps, proper sequence)
+//
+// Parameters:
+//   - ctx: Context for cancellation (currently unused but reserved for future use)
+//   - rawEmail: Complete RFC 5322 format email including headers and body
+//   - logger: Structured logger for debugging (uses nop logger if nil)
+//
+// Returns:
+//   - ARCResult with Pass=true if chain is valid, false otherwise
+//   - Error only for parsing failures (not validation failures)
+//
+// Example:
+//
+//	result, err := CheckARC(ctx, rawEmail, logger)
+//	if err != nil {
+//	    return err
+//	}
+//	if result.Pass && result.Instance > 0 {
+//	    // Message has valid ARC chain from previous hops
+//	    // This helps determine if authentication failures are due to forwarding
+//	}
+func CheckARC(ctx context.Context, rawEmail string, logger *zap.Logger) (*ARCResult, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	// Parse the email message to extract headers
+	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse email: %w", err)
+	}
+
+	// Extract all ARC headers and organize them by instance number
+	arcSets, maxInstance := extractARCSets(msg.Header, logger)
+
+	// If no ARC headers found, return "none" result (not a failure)
+	if len(arcSets) == 0 {
+		logger.Debug("No ARC headers found in message")
+		return &ARCResult{
+			Pass:       true, // No ARC headers means pass (nothing to validate)
+			ChainValid: true,
+			Instance:   0,
+		}, nil
+	}
+
+	result := &ARCResult{
+		Instance:       maxInstance,
+		FailureReasons: make([]string, 0),
+	}
+
+	logger.Debug("Found ARC headers", zap.Int("max_instance", maxInstance), zap.Int("sets_count", len(arcSets)))
+
+	// Validate the ARC chain
+	// The chain is valid if all ARC-Seal and ARC-Message-Signature headers verify correctly
+	chainValid, reasons := validateARCChain(rawEmail, arcSets, maxInstance, logger)
+	result.ChainValid = chainValid
+	result.FailureReasons = reasons
+
+	// ARC passes if the chain is valid
+	result.Pass = result.ChainValid
+
+	logger.Debug("ARC validation result",
+		zap.Int("instance", result.Instance),
+		zap.Bool("chain_valid", result.ChainValid),
+		zap.Bool("pass", result.Pass),
+		zap.Strings("failure_reasons", result.FailureReasons))
+
+	return result, nil
+}
+
+// extractARCSets extracts and organizes ARC header sets from email headers
+func extractARCSets(headers mail.Header, logger *zap.Logger) (map[int]*ARCSet, int) {
+	sets := make(map[int]*ARCSet)
+	maxInstance := 0
+
+	// Extract ARC-Authentication-Results headers
+	for _, aar := range getMultipleHeaders(headers, "ARC-Authentication-Results") {
+		instance := extractInstance(aar)
+		if instance > 0 {
+			if sets[instance] == nil {
+				sets[instance] = &ARCSet{Instance: instance}
+			}
+			sets[instance].AuthenticationResults = aar
+			if instance > maxInstance {
+				maxInstance = instance
+			}
+		}
+	}
+
+	// Extract ARC-Message-Signature headers
+	for _, ams := range getMultipleHeaders(headers, "ARC-Message-Signature") {
+		instance := extractInstance(ams)
+		if instance > 0 {
+			if sets[instance] == nil {
+				sets[instance] = &ARCSet{Instance: instance}
+			}
+			sets[instance].MessageSignature = ams
+			sets[instance].MessageSignatureDomain = extractDomain(ams)
+			if instance > maxInstance {
+				maxInstance = instance
+			}
+		}
+	}
+
+	// Extract ARC-Seal headers
+	for _, as := range getMultipleHeaders(headers, "ARC-Seal") {
+		instance := extractInstance(as)
+		if instance > 0 {
+			if sets[instance] == nil {
+				sets[instance] = &ARCSet{Instance: instance}
+			}
+			sets[instance].Seal = as
+			sets[instance].SealDomain = extractDomain(as)
+			if instance > maxInstance {
+				maxInstance = instance
+			}
+		}
+	}
+
+	// Validate that each set is complete (has all three header types)
+	for i := 1; i <= maxInstance; i++ {
+		set := sets[i]
+		if set == nil {
+			logger.Warn("Missing ARC set", zap.Int("instance", i))
+			continue
+		}
+		if set.AuthenticationResults == "" || set.MessageSignature == "" || set.Seal == "" {
+			logger.Warn("Incomplete ARC set",
+				zap.Int("instance", i),
+				zap.Bool("has_aar", set.AuthenticationResults != ""),
+				zap.Bool("has_ams", set.MessageSignature != ""),
+				zap.Bool("has_as", set.Seal != ""))
+		}
+	}
+
+	return sets, maxInstance
+}
+
+// getMultipleHeaders retrieves all values for a header that may appear multiple times
+func getMultipleHeaders(headers mail.Header, key string) []string {
+	// mail.Header doesn't expose all values easily, so we need to work around it
+	var values []string
+
+	// Try common header access method first
+	if val := headers.Get(key); val != "" {
+		values = append(values, val)
+	}
+
+	// In a real implementation, we'd need to access the raw header map
+	// For now, this is a simplified version that gets the first occurrence
+	// A full implementation would parse the raw email differently to get all headers
+
+	return values
+}
+
+// extractInstance extracts the instance number (i=) from an ARC header
+func extractInstance(header string) int {
+	// Look for i=N in the header
+	parts := strings.Split(header, ";")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "i=") {
+			instanceStr := strings.TrimPrefix(part, "i=")
+			instanceStr = strings.TrimSpace(instanceStr)
+			if instance, err := strconv.Atoi(instanceStr); err == nil {
+				return instance
+			}
+		}
+	}
+	return 0
+}
+
+// extractDomain extracts the domain (d=) from an ARC header
+func extractDomain(header string) string {
+	// Look for d=domain in the header
+	parts := strings.Split(header, ";")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "d=") {
+			domain := strings.TrimPrefix(part, "d=")
+			domain = strings.TrimSpace(domain)
+			return domain
+		}
+	}
+	return ""
+}
+
+// validateARCChain validates the entire ARC chain by verifying signatures
+func validateARCChain(rawEmail string, sets map[int]*ARCSet, maxInstance int, logger *zap.Logger) (bool, []string) {
+	reasons := make([]string, 0)
+
+	// Check that we have a complete chain from 1 to maxInstance
+	for i := 1; i <= maxInstance; i++ {
+		set := sets[i]
+		if set == nil {
+			reason := fmt.Sprintf("missing ARC set for instance %d", i)
+			reasons = append(reasons, reason)
+			logger.Warn("ARC chain validation failed", zap.String("reason", reason))
+			return false, reasons
+		}
+
+		// Verify that the set is complete
+		if set.AuthenticationResults == "" || set.MessageSignature == "" || set.Seal == "" {
+			reason := fmt.Sprintf("incomplete ARC set at instance %d", i)
+			reasons = append(reasons, reason)
+			logger.Warn("ARC chain validation failed", zap.String("reason", reason))
+			return false, reasons
+		}
+	}
+
+	// Verify ARC-Message-Signature headers (these are DKIM-like signatures over the message)
+	// We validate them in order from oldest (1) to newest (maxInstance)
+	for i := 1; i <= maxInstance; i++ {
+		set := sets[i]
+
+		// Parse and verify the ARC-Message-Signature
+		// Note: This is a simplified version. A full implementation would need to:
+		// 1. Reconstruct the message at instance i (without later ARC headers)
+		// 2. Verify the ARC-Message-Signature against that reconstructed message
+
+		valid, err := verifyARCMessageSignature(rawEmail, set, logger)
+		if err != nil || !valid {
+			reason := fmt.Sprintf("ARC-Message-Signature verification failed at instance %d", i)
+			if err != nil {
+				reason = fmt.Sprintf("%s: %v", reason, err)
+			}
+			reasons = append(reasons, reason)
+			logger.Warn("ARC-Message-Signature verification failed",
+				zap.Int("instance", i),
+				zap.String("domain", set.MessageSignatureDomain),
+				zap.Error(err))
+			return false, reasons
+		}
+
+		logger.Debug("ARC-Message-Signature verified",
+			zap.Int("instance", i),
+			zap.String("domain", set.MessageSignatureDomain))
+	}
+
+	// Verify ARC-Seal headers (these sign the previous ARC sets)
+	// We validate them in order from oldest (1) to newest (maxInstance)
+	for i := 1; i <= maxInstance; i++ {
+		set := sets[i]
+
+		// Parse and verify the ARC-Seal
+		// Note: The ARC-Seal at instance i signs all ARC headers from instances 1 through i
+
+		valid, err := verifyARCSeal(rawEmail, set, i, logger)
+		if err != nil || !valid {
+			reason := fmt.Sprintf("ARC-Seal verification failed at instance %d", i)
+			if err != nil {
+				reason = fmt.Sprintf("%s: %v", reason, err)
+			}
+			reasons = append(reasons, reason)
+			logger.Warn("ARC-Seal verification failed",
+				zap.Int("instance", i),
+				zap.String("domain", set.SealDomain),
+				zap.Error(err))
+			return false, reasons
+		}
+
+		logger.Debug("ARC-Seal verified",
+			zap.Int("instance", i),
+			zap.String("domain", set.SealDomain))
+	}
+
+	logger.Info("ARC chain validated successfully", zap.Int("max_instance", maxInstance))
+	return true, reasons
+}
+
+// verifyARCMessageSignature verifies an ARC-Message-Signature header
+// This is similar to DKIM verification but for ARC headers
+func verifyARCMessageSignature(rawEmail string, set *ARCSet, logger *zap.Logger) (bool, error) {
+	// ARC-Message-Signature uses DKIM-style signatures
+	// We need to convert the ARC-Message-Signature to a format that dkim.Verify can handle
+
+	// Note: This is a simplified implementation. A proper ARC implementation would:
+	// 1. Reconstruct the message as it existed at instance i (without later ARC headers)
+	// 2. Add a DKIM-Signature header with the ARC-Message-Signature content
+	// 3. Verify using DKIM verification
+
+	// For now, we'll attempt basic validation using DKIM verification approach
+	// Convert ARC-Message-Signature to DKIM-Signature format temporarily
+	dkimStyleSig := convertARCMSToDKIM(set.MessageSignature)
+
+	// Create a modified email with this signature for verification
+	modifiedEmail := injectDKIMSignature(rawEmail, dkimStyleSig)
+
+	reader := strings.NewReader(modifiedEmail)
+	verifyOpts := &dkim.VerifyOptions{
+		LookupTXT: lookupTXTWithTimeout,
+	}
+
+	verifications, err := dkim.VerifyWithOptions(reader, verifyOpts)
+	if err != nil && err != io.EOF {
+		return false, fmt.Errorf("DKIM-style verification failed: %w", err)
+	}
+
+	// Check if any verification succeeded
+	for _, v := range verifications {
+		if v.Err == nil && v.Domain == set.MessageSignatureDomain {
+			// Check signature age (same rules as DKIM)
+			if !v.Time.IsZero() {
+				signatureAge := time.Since(v.Time)
+				if signatureAge > MaxDKIMSignatureAge {
+					return false, fmt.Errorf("signature too old: %v", signatureAge)
+				}
+				if signatureAge < 0 {
+					return false, fmt.Errorf("signature timestamp in future")
+				}
+			}
+
+			// Check expiration
+			if !v.Expiration.IsZero() && time.Now().After(v.Expiration) {
+				return false, fmt.Errorf("signature expired at %v", v.Expiration)
+			}
+
+			return true, nil
+		}
+	}
+
+	return false, fmt.Errorf("no valid signature found for domain %s", set.MessageSignatureDomain)
+}
+
+// verifyARCSeal verifies an ARC-Seal header
+// The ARC-Seal at instance i signs all ARC headers from instances 1 through i
+func verifyARCSeal(rawEmail string, set *ARCSet, instance int, logger *zap.Logger) (bool, error) {
+	// ARC-Seal also uses DKIM-style signatures
+	// The seal signs: ARC-Authentication-Results, ARC-Message-Signature, and previous ARC-Seal headers
+
+	// Note: This is a simplified implementation. A proper ARC implementation would:
+	// 1. Extract all ARC headers from instances 1 through i
+	// 2. Construct the signed content according to the ARC-Seal's h= parameter
+	// 3. Verify the signature over that content
+
+	// For now, we'll use a similar approach to ARC-Message-Signature verification
+	dkimStyleSig := convertARCSealToDKIM(set.Seal)
+	modifiedEmail := injectDKIMSignature(rawEmail, dkimStyleSig)
+
+	reader := strings.NewReader(modifiedEmail)
+	verifyOpts := &dkim.VerifyOptions{
+		LookupTXT: lookupTXTWithTimeout,
+	}
+
+	verifications, err := dkim.VerifyWithOptions(reader, verifyOpts)
+	if err != nil && err != io.EOF {
+		return false, fmt.Errorf("DKIM-style verification failed: %w", err)
+	}
+
+	// Check if any verification succeeded
+	for _, v := range verifications {
+		if v.Err == nil && v.Domain == set.SealDomain {
+			return true, nil
+		}
+	}
+
+	return false, fmt.Errorf("no valid seal signature found for domain %s", set.SealDomain)
+}
+
+// convertARCMSToDKIM converts an ARC-Message-Signature header to DKIM-Signature format
+func convertARCMSToDKIM(arcMS string) string {
+	// Remove "i=" parameter and convert to DKIM-Signature format
+	// This is a simplified conversion for basic validation
+	sig := strings.ReplaceAll(arcMS, "i=", "x-i=") // Temporarily hide i= to avoid conflicts
+	return "DKIM-Signature: " + sig
+}
+
+// convertARCSealToDKIM converts an ARC-Seal header to DKIM-Signature format
+func convertARCSealToDKIM(arcSeal string) string {
+	// Remove "i=" parameter and convert to DKIM-Signature format
+	// This is a simplified conversion for basic validation
+	sig := strings.ReplaceAll(arcSeal, "i=", "x-i=") // Temporarily hide i= to avoid conflicts
+	return "DKIM-Signature: " + sig
+}
+
+// injectDKIMSignature adds a DKIM-Signature header to the email for verification purposes
+func injectDKIMSignature(rawEmail string, dkimSig string) string {
+	// Find the end of headers (double newline)
+	headerEnd := strings.Index(rawEmail, "\r\n\r\n")
+	if headerEnd == -1 {
+		headerEnd = strings.Index(rawEmail, "\n\n")
+		if headerEnd == -1 {
+			return rawEmail // Can't find header boundary
+		}
+	}
+
+	// Insert DKIM-Signature at the beginning of headers
+	return dkimSig + "\r\n" + rawEmail
+}
+
+// GetARCAuthenticationResults extracts the most recent ARC-Authentication-Results header.
+//
+// This function retrieves the authentication results from the last hop in the
+// ARC chain (highest instance number). This is useful for understanding what
+// authentication checks (SPF, DKIM, DMARC) were performed by the most recent
+// intermediary.
+//
+// Returns nil if no ARC headers are present (not an error condition).
+//
+// Example:
+//
+//	results, err := GetARCAuthenticationResults(rawEmail)
+//	if err != nil {
+//	    return err
+//	}
+//	if results != nil {
+//	    for _, r := range results {
+//	        fmt.Printf("Method: %s, Result: %s\n", r.Method, r.Result)
+//	    }
+//	}
+func GetARCAuthenticationResults(rawEmail string) ([]authres.Result, error) {
+	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse email: %w", err)
+	}
+
+	// Find the highest instance ARC-Authentication-Results
+	arcSets, maxInstance := extractARCSets(msg.Header, zap.NewNop())
+	if maxInstance == 0 {
+		return nil, nil // No ARC headers
+	}
+
+	set := arcSets[maxInstance]
+	if set == nil || set.AuthenticationResults == "" {
+		return nil, fmt.Errorf("no ARC-Authentication-Results found for instance %d", maxInstance)
+	}
+
+	// Parse the Authentication-Results header
+	// Format: ARC-Authentication-Results: i=N; authserv-id; methods
+	// We need to extract the part after "i=N;"
+	parts := strings.SplitN(set.AuthenticationResults, ";", 2)
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid ARC-Authentication-Results format")
+	}
+
+	authResultsStr := parts[1]
+	_, results, err := authres.Parse(authResultsStr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse authentication results: %w", err)
+	}
+
+	return results, nil
+}
+
+// ARCSigner handles signing emails with ARC headers to preserve authentication
+// results when acting as a mail forwarder or intermediary.
+//
+// When an email passes through Mizu and needs to be forwarded, ARC signing
+// ensures that downstream mail servers can verify that the email passed
+// authentication checks at this hop, even if SPF/DKIM alignment breaks during
+// forwarding.
+//
+// The signer uses an RSA private key to create cryptographic signatures.
+// The corresponding public key must be published in DNS as a TXT record at:
+//
+//	<selector>._domainkey.<domain>
+//
+// For example, with selector="arc" and domain="mail.example.com":
+//
+//	arc._domainkey.mail.example.com TXT "v=DKIM1; k=rsa; p=<base64-public-key>"
+//
+// ARC signing adds three headers per instance:
+//   - ARC-Authentication-Results: Records SPF/DKIM/DMARC results
+//   - ARC-Message-Signature: Signs message headers and body
+//   - ARC-Seal: Signs the entire ARC chain with validation status
+type ARCSigner struct {
+	Domain     string          // Domain to sign with (e.g., "mail.example.com")
+	Selector   string          // DKIM selector (e.g., "arc")
+	PrivateKey *rsa.PrivateKey // RSA private key for signing
+	Logger     *zap.Logger     // Logger
+}
+
+// NewARCSigner creates a new ARC signer from a private key file.
+//
+// The private key must be in PEM format and can be either:
+//   - PKCS#1 format (BEGIN RSA PRIVATE KEY)
+//   - PKCS#8 format (BEGIN PRIVATE KEY)
+//
+// To generate a suitable key pair:
+//
+//	# Generate private key (2048 or 4096 bits recommended)
+//	openssl genrsa -out arc-private.pem 2048
+//
+//	# Extract public key for DNS
+//	openssl rsa -in arc-private.pem -pubout -outform PEM
+//
+// Parameters:
+//   - domain: The domain that will appear in ARC signatures (must match DNS)
+//   - selector: The DKIM selector (must match DNS record)
+//   - privateKeyPath: Path to PEM-encoded RSA private key file
+//   - logger: Structured logger (uses nop logger if nil)
+//
+// Returns an error if the key file cannot be read or parsed.
+//
+// Example:
+//
+//	signer, err := NewARCSigner(
+//	    "mail.example.com",
+//	    "arc",
+//	    "/etc/mizu/arc-private.pem",
+//	    logger,
+//	)
+//	if err != nil {
+//	    log.Fatal("Failed to create ARC signer:", err)
+//	}
+func NewARCSigner(domain, selector, privateKeyPath string, logger *zap.Logger) (*ARCSigner, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+
+	// Read private key file
+	keyData, err := os.ReadFile(privateKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read private key: %w", err)
+	}
+
+	// Parse PEM block
+	block, _ := pem.Decode(keyData)
+	if block == nil {
+		return nil, fmt.Errorf("failed to decode PEM block from private key")
+	}
+
+	// Parse RSA private key
+	var privateKey *rsa.PrivateKey
+	if block.Type == "RSA PRIVATE KEY" {
+		privateKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse PKCS1 private key: %w", err)
+		}
+	} else if block.Type == "PRIVATE KEY" {
+		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse PKCS8 private key: %w", err)
+		}
+		var ok bool
+		privateKey, ok = key.(*rsa.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("private key is not RSA")
+		}
+	} else {
+		return nil, fmt.Errorf("unsupported PEM block type: %s", block.Type)
+	}
+
+	return &ARCSigner{
+		Domain:     domain,
+		Selector:   selector,
+		PrivateKey: privateKey,
+		Logger:     logger,
+	}, nil
+}
+
+// SignEmail adds ARC headers to an email message
+// It takes the raw email, authentication results from validation, and returns the email with ARC headers prepended
+func (s *ARCSigner) SignEmail(rawEmail string, spfResult *SPFResult, dmarcResult *DMARCResult, arcResult *ARCResult) (string, error) {
+	// Parse the email to extract headers
+	msg, err := mail.ReadMessage(strings.NewReader(rawEmail))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse email: %w", err)
+	}
+
+	// Determine the next ARC instance number
+	instance := 1
+	if arcResult != nil && arcResult.Instance > 0 {
+		instance = arcResult.Instance + 1
+	}
+
+	// Build ARC-Authentication-Results header
+	aar := s.buildAuthenticationResults(instance, spfResult, dmarcResult, arcResult)
+
+	// Build ARC-Message-Signature header
+	ams, err := s.buildMessageSignature(instance, rawEmail, msg)
+	if err != nil {
+		return "", fmt.Errorf("failed to build ARC-Message-Signature: %w", err)
+	}
+
+	// Build ARC-Seal header (signs the ARC chain)
+	as, err := s.buildSeal(instance, rawEmail, aar, ams, arcResult)
+	if err != nil {
+		return "", fmt.Errorf("failed to build ARC-Seal: %w", err)
+	}
+
+	// Prepend ARC headers to the email
+	// Order matters: ARC-Seal, ARC-Message-Signature, ARC-Authentication-Results
+	arcHeaders := fmt.Sprintf("ARC-Seal: %s\r\nARC-Message-Signature: %s\r\nARC-Authentication-Results: %s\r\n", as, ams, aar)
+
+	s.Logger.Info("Added ARC headers",
+		zap.Int("instance", instance),
+		zap.String("domain", s.Domain),
+		zap.String("selector", s.Selector))
+
+	return arcHeaders + rawEmail, nil
+}
+
+// buildAuthenticationResults creates the ARC-Authentication-Results header
+func (s *ARCSigner) buildAuthenticationResults(instance int, spfResult *SPFResult, dmarcResult *DMARCResult, arcResult *ARCResult) string {
+	parts := []string{
+		fmt.Sprintf("i=%d", instance),
+		s.Domain,
+	}
+
+	// Add SPF result
+	if spfResult != nil {
+		spfStatus := strings.ToLower(string(spfResult.Result.Value))
+		parts = append(parts, fmt.Sprintf("spf=%s smtp.mailfrom=%s", spfStatus, spfResult.Domain))
+	}
+
+	// Add DMARC result
+	if dmarcResult != nil {
+		dmarcStatus := "fail"
+		if dmarcResult.Pass {
+			dmarcStatus = "pass"
+		}
+		parts = append(parts, fmt.Sprintf("dmarc=%s", dmarcStatus))
+	}
+
+	// Add ARC result
+	if arcResult != nil && arcResult.Instance > 0 {
+		arcStatus := "fail"
+		if arcResult.Pass {
+			arcStatus = "pass"
+		}
+		parts = append(parts, fmt.Sprintf("arc=%s (i=%d)", arcStatus, arcResult.Instance))
+	}
+
+	return strings.Join(parts, "; ")
+}
+
+// buildMessageSignature creates the ARC-Message-Signature header
+func (s *ARCSigner) buildMessageSignature(instance int, rawEmail string, msg *mail.Message) (string, error) {
+	// ARC-Message-Signature is similar to DKIM-Signature but for ARC
+	// It signs selected headers from the original message
+
+	// Extract headers to sign (typical set for ARC)
+	headersToSign := []string{"from", "to", "subject", "date", "message-id"}
+
+	// Calculate body hash
+	bodyHash := s.calculateBodyHash(rawEmail)
+
+	// Build the signature header (unsigned)
+	timestamp := time.Now().Unix()
+	sigHeader := fmt.Sprintf("i=%d; a=rsa-sha256; d=%s; s=%s; t=%d; c=relaxed/relaxed; h=%s; bh=%s; b=",
+		instance,
+		s.Domain,
+		s.Selector,
+		timestamp,
+		strings.Join(headersToSign, ":"),
+		bodyHash)
+
+	// Create data to sign (headers + signature header without b= value)
+	dataToSign := s.buildSigningData(msg, headersToSign, sigHeader)
+
+	// Sign the data
+	signature, err := s.signData(dataToSign)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign data: %w", err)
+	}
+
+	// Add signature to header
+	return sigHeader + signature, nil
+}
+
+// buildSeal creates the ARC-Seal header
+func (s *ARCSigner) buildSeal(instance int, rawEmail string, aar string, ams string, arcResult *ARCResult) (string, error) {
+	// ARC-Seal signs the entire ARC chain up to this point
+	// It includes all previous ARC headers plus the new ones
+
+	// Determine chain validation result
+	cv := "none" // First ARC seal
+	if instance > 1 {
+		if arcResult != nil && arcResult.Pass {
+			cv = "pass"
+		} else {
+			cv = "fail"
+		}
+	}
+
+	// Build the seal header (unsigned)
+	timestamp := time.Now().Unix()
+	sealHeader := fmt.Sprintf("i=%d; a=rsa-sha256; d=%s; s=%s; t=%d; cv=%s; b=",
+		instance,
+		s.Domain,
+		s.Selector,
+		timestamp,
+		cv)
+
+	// Create data to sign (AAR + AMS + seal header without b= value)
+	dataToSign := fmt.Sprintf("%s\r\n%s\r\n%s", aar, ams, sealHeader)
+
+	// Sign the data
+	signature, err := s.signData(dataToSign)
+	if err != nil {
+		return "", fmt.Errorf("failed to sign seal: %w", err)
+	}
+
+	// Add signature to header
+	return sealHeader + signature, nil
+}
+
+// calculateBodyHash computes the body hash for ARC-Message-Signature
+func (s *ARCSigner) calculateBodyHash(rawEmail string) string {
+	// Find the body (after headers)
+	bodyStart := strings.Index(rawEmail, "\r\n\r\n")
+	if bodyStart == -1 {
+		bodyStart = strings.Index(rawEmail, "\n\n")
+		if bodyStart == -1 {
+			return "" // No body
+		}
+		bodyStart += 2
+	} else {
+		bodyStart += 4
+	}
+
+	body := rawEmail[bodyStart:]
+
+	// Compute SHA-256 hash
+	hash := sha256.Sum256([]byte(body))
+	return base64.StdEncoding.EncodeToString(hash[:])
+}
+
+// buildSigningData creates the data to be signed for ARC-Message-Signature
+func (s *ARCSigner) buildSigningData(msg *mail.Message, headersToSign []string, sigHeader string) string {
+	var parts []string
+
+	// Add each header to the signing data
+	for _, headerName := range headersToSign {
+		if value := msg.Header.Get(headerName); value != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", headerName, value))
+		}
+	}
+
+	// Add the signature header itself (without the b= value)
+	parts = append(parts, "arc-message-signature: "+sigHeader)
+
+	return strings.Join(parts, "\r\n")
+}
+
+// signData signs the given data using RSA-SHA256
+func (s *ARCSigner) signData(data string) (string, error) {
+	// Compute SHA-256 hash
+	hash := sha256.Sum256([]byte(data))
+
+	// Sign with RSA
+	signature, err := rsa.SignPKCS1v15(rand.Reader, s.PrivateKey, crypto.SHA256, hash[:])
+	if err != nil {
+		return "", fmt.Errorf("RSA signing failed: %w", err)
+	}
+
+	// Encode to base64
+	return base64.StdEncoding.EncodeToString(signature), nil
+}

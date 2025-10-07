@@ -1,0 +1,14 @@
+[Unit]
+Description=Mizu SMTP Relay Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mizu-server --config /etc/mizu/config.toml
+Restart=always
+RestartSec=10
+User=mizu
+EnvironmentFile=/etc/mizu/secrets.env
+
+[Install]
+WantedBy=multi-user.target

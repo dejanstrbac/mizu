@@ -47,11 +47,29 @@ func (c *Config) Validate() error {
 	if c.Destination.APIKey == "" || c.Destination.APIKey == "your-api-key-here" {
 		return errors.New("destination.api_key must be set")
 	}
-	if c.S3.AccessKeyID == "" || c.S3.AccessKeyID == "your-s3-access-key-id" {
-		return errors.New("s3.access_key_id must be set")
+
+	// Validate storage configuration based on backend
+	if c.Storage.Backend == "" {
+		c.Storage.Backend = "s3" // Default to S3
 	}
-	if c.S3.SecretAccessKey == "" || c.S3.SecretAccessKey == "your-s3-secret-access-key" {
-		return errors.New("s3.secret_access_key must be set")
+
+	switch c.Storage.Backend {
+	case "s3":
+		if c.Storage.AccessKeyID == "" || c.Storage.AccessKeyID == "your-s3-access-key-id" {
+			return errors.New("storage.access_key_id must be set when using S3 backend")
+		}
+		if c.Storage.SecretAccessKey == "" || c.Storage.SecretAccessKey == "your-s3-secret-access-key" {
+			return errors.New("storage.secret_access_key must be set when using S3 backend")
+		}
+		if c.Storage.Bucket == "" {
+			return errors.New("storage.bucket must be set when using S3 backend")
+		}
+	case "filesystem":
+		if c.Storage.FilesystemPath == "" {
+			return errors.New("storage.filesystem_path must be set when using filesystem backend")
+		}
+	default:
+		return fmt.Errorf("invalid storage backend: %s (must be 's3' or 'filesystem')", c.Storage.Backend)
 	}
 	if c.TLS.Email == "" || c.TLS.Email == "admin@example.com" {
 		return errors.New("tls.email must be set for Let's Encrypt certificate management")

@@ -20,7 +20,7 @@ func TestCircuitBreaker_HalfOpenCallsNeverNegative(t *testing.T) {
 		ResetTimeout:     1 * time.Second,
 	}
 
-	cb := NewCircuitBreaker(config, zap.NewNop())
+	cb := NewCircuitBreaker(config, zap.NewNop(), nil)
 
 	// Force circuit to Open state by triggering failures
 	for i := 0; i < 3; i++ {
@@ -90,7 +90,7 @@ func TestCircuitBreaker_ConcurrentHalfOpenCalls(t *testing.T) {
 		ResetTimeout:     1 * time.Second,
 	}
 
-	cb := NewCircuitBreaker(config, zap.NewNop())
+	cb := NewCircuitBreaker(config, zap.NewNop(), nil)
 
 	// Force to Open state
 	cb.Call(func() error { return errors.New("fail") })
@@ -160,7 +160,7 @@ func TestCircuitBreaker_HalfOpenFailureResetsCounter(t *testing.T) {
 		ResetTimeout:     1 * time.Second,
 	}
 
-	cb := NewCircuitBreaker(config, zap.NewNop())
+	cb := NewCircuitBreaker(config, zap.NewNop(), nil)
 
 	// Force to Open
 	cb.Call(func() error { return errors.New("fail") })
@@ -216,7 +216,7 @@ func TestCircuitBreaker_StateTransitions(t *testing.T) {
 		ResetTimeout:     1 * time.Second,
 	}
 
-	cb := NewCircuitBreaker(config, zap.NewNop())
+	cb := NewCircuitBreaker(config, zap.NewNop(), nil)
 
 	checkInvariants := func(stage string) {
 		cb.mu.RLock()

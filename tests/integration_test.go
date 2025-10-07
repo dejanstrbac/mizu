@@ -127,12 +127,12 @@ func TestComponentsIntegration(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Local = true
 	cfg.Stats.Enabled = true
-	cfg.Stats.RetentionDuration = 1 * time.Hour
+	cfg.Stats.RetentionSeconds = 3600 // 1 hour
 
 	// Initialize stats manager
 	statsMgr := stats.NewManager(
 		cfg.Stats.Enabled,
-		cfg.Stats.RetentionDuration,
+		time.Duration(cfg.Stats.RetentionSeconds)*time.Second,
 		"test-host",
 		false,
 		1*time.Minute,

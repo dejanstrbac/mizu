@@ -92,7 +92,7 @@ listen_addr = ":2525"
 domain = "mail.test.com"
 max_message_size = 5242880
 
-[s3]
+[storage]
 endpoint = "s3.amazonaws.com"
 bucket = "test-bucket"
 region = "us-west-2"
@@ -122,8 +122,8 @@ log_format = "json"
 		t.Errorf("SMTP.Domain = %s; want mail.test.com", cfg.SMTP.Domain)
 	}
 
-	if cfg.S3.Bucket != "test-bucket" {
-		t.Errorf("S3.Bucket = %s; want test-bucket", cfg.S3.Bucket)
+	if cfg.Storage.Bucket != "test-bucket" {
+		t.Errorf("Storage.Bucket = %s; want test-bucket", cfg.Storage.Bucket)
 	}
 
 	if cfg.Destination.URL != "https://destination.example.com/email" {
@@ -191,16 +191,16 @@ func TestLoadEnvVars(t *testing.T) {
 	cfg := &defaultCfg
 	loadEnvVars(cfg)
 
-	if cfg.S3.AccessKeyID != "test-access-key" {
-		t.Errorf("S3.AccessKeyID = %s; want test-access-key", cfg.S3.AccessKeyID)
+	if cfg.Storage.AccessKeyID != "test-access-key" {
+		t.Errorf("S3.AccessKeyID = %s; want test-access-key", cfg.Storage.AccessKeyID)
 	}
 
-	if cfg.S3.SecretAccessKey != "test-secret-key" {
-		t.Errorf("S3.SecretAccessKey = %s; want test-secret-key", cfg.S3.SecretAccessKey)
+	if cfg.Storage.SecretAccessKey != "test-secret-key" {
+		t.Errorf("S3.SecretAccessKey = %s; want test-secret-key", cfg.Storage.SecretAccessKey)
 	}
 
-	if cfg.S3.Endpoint != "test-endpoint" {
-		t.Errorf("S3.Endpoint = %s; want test-endpoint", cfg.S3.Endpoint)
+	if cfg.Storage.Endpoint != "test-endpoint" {
+		t.Errorf("S3.Endpoint = %s; want test-endpoint", cfg.Storage.Endpoint)
 	}
 
 	if cfg.Destination.URL != "https://test-destination.com" {
@@ -242,7 +242,7 @@ func TestValidateConfig_ProductionMode(t *testing.T) {
 			name: "missing S3 bucket",
 			modifyFunc: func(c *Config) {
 				c.SMTP.Domain = "mail.example.com"
-				c.S3.Bucket = ""
+				c.Storage.Bucket = ""
 			},
 			expectError: true,
 			errorMsg:    "S3 bucket must be configured",
@@ -251,8 +251,8 @@ func TestValidateConfig_ProductionMode(t *testing.T) {
 			name: "missing S3 access key",
 			modifyFunc: func(c *Config) {
 				c.SMTP.Domain = "mail.example.com"
-				c.S3.Bucket = "test-bucket"
-				c.S3.AccessKeyID = ""
+				c.Storage.Bucket = "test-bucket"
+				c.Storage.AccessKeyID = ""
 			},
 			expectError: true,
 			errorMsg:    "S3 access key ID must be configured",
@@ -261,9 +261,9 @@ func TestValidateConfig_ProductionMode(t *testing.T) {
 			name: "missing S3 secret key",
 			modifyFunc: func(c *Config) {
 				c.SMTP.Domain = "mail.example.com"
-				c.S3.Bucket = "test-bucket"
-				c.S3.AccessKeyID = "test-key"
-				c.S3.SecretAccessKey = ""
+				c.Storage.Bucket = "test-bucket"
+				c.Storage.AccessKeyID = "test-key"
+				c.Storage.SecretAccessKey = ""
 			},
 			expectError: true,
 			errorMsg:    "S3 secret access key must be configured",
@@ -272,9 +272,9 @@ func TestValidateConfig_ProductionMode(t *testing.T) {
 			name: "missing destination URL",
 			modifyFunc: func(c *Config) {
 				c.SMTP.Domain = "mail.example.com"
-				c.S3.Bucket = "test-bucket"
-				c.S3.AccessKeyID = "test-key"
-				c.S3.SecretAccessKey = "test-secret"
+				c.Storage.Bucket = "test-bucket"
+				c.Storage.AccessKeyID = "test-key"
+				c.Storage.SecretAccessKey = "test-secret"
 				c.Destination.URL = ""
 			},
 			expectError: true,
@@ -284,9 +284,9 @@ func TestValidateConfig_ProductionMode(t *testing.T) {
 			name: "missing destination API key",
 			modifyFunc: func(c *Config) {
 				c.SMTP.Domain = "mail.example.com"
-				c.S3.Bucket = "test-bucket"
-				c.S3.AccessKeyID = "test-key"
-				c.S3.SecretAccessKey = "test-secret"
+				c.Storage.Bucket = "test-bucket"
+				c.Storage.AccessKeyID = "test-key"
+				c.Storage.SecretAccessKey = "test-secret"
 				c.Destination.URL = "https://test.com"
 				c.Destination.APIKey = ""
 			},
@@ -297,9 +297,9 @@ func TestValidateConfig_ProductionMode(t *testing.T) {
 			name: "valid production config",
 			modifyFunc: func(c *Config) {
 				c.SMTP.Domain = "mail.example.com"
-				c.S3.Bucket = "test-bucket"
-				c.S3.AccessKeyID = "test-key"
-				c.S3.SecretAccessKey = "test-secret"
+				c.Storage.Bucket = "test-bucket"
+				c.Storage.AccessKeyID = "test-key"
+				c.Storage.SecretAccessKey = "test-secret"
 				c.Destination.URL = "https://test.com"
 				c.Destination.APIKey = "test-api-key"
 			},
@@ -358,12 +358,12 @@ func TestDefaultConfig(t *testing.T) {
 		t.Errorf("SMTP.MinTLSVersion = %s; want 1.2", cfg.SMTP.MinTLSVersion)
 	}
 
-	if cfg.S3.Endpoint != "s3.amazonaws.com" {
-		t.Errorf("S3.Endpoint = %s; want s3.amazonaws.com", cfg.S3.Endpoint)
+	if cfg.Storage.Endpoint != "s3.amazonaws.com" {
+		t.Errorf("S3.Endpoint = %s; want s3.amazonaws.com", cfg.Storage.Endpoint)
 	}
 
-	if cfg.S3.Region != "us-east-1" {
-		t.Errorf("S3.Region = %s; want us-east-1", cfg.S3.Region)
+	if cfg.Storage.Region != "us-east-1" {
+		t.Errorf("S3.Region = %s; want us-east-1", cfg.Storage.Region)
 	}
 
 	if cfg.Destination.MaxRetryAttempts != 3 {
@@ -425,7 +425,7 @@ func TestSaveExample(t *testing.T) {
 
 	// Verify it contains expected sections
 	content := string(data)
-	expectedSections := []string{"[smtp]", "[s3]", "[destination]", "[tls]", "[blacklists]", "[stats]"}
+	expectedSections := []string{"[smtp]", "[storage]", "[destination]", "[tls]", "[blacklists]", "[stats]"}
 	for _, section := range expectedSections {
 		if !contains(content, section) {
 			t.Errorf("example file missing section: %s", section)

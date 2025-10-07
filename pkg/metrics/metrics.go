@@ -20,6 +20,7 @@ type Metrics struct {
 	SMTPSPFChecks       *prometheus.CounterVec
 	SMTPDMARCChecks     *prometheus.CounterVec
 	SMTPDKIMChecks      *prometheus.CounterVec
+	SMTPARCChecks       *prometheus.CounterVec
 	SMTPBlacklistChecks *prometheus.CounterVec
 
 	// HTTP destination metrics
@@ -132,6 +133,12 @@ func New(namespace string) *Metrics {
 			Subsystem: "smtp",
 			Name:      "dkim_checks_total",
 			Help:      "Total number of DKIM checks performed",
+		}, []string{"result"}),
+		SMTPARCChecks: promauto.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace,
+			Subsystem: "smtp",
+			Name:      "arc_checks_total",
+			Help:      "Total number of ARC (Authenticated Received Chain) checks performed",
 		}, []string{"result"}),
 		SMTPBlacklistChecks: promauto.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace,

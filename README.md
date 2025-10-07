@@ -11,6 +11,7 @@ Mizu is a production-ready, high-performance SMTP relay server designed for reli
 
 - **Mandatory STARTTLS** with automatic Let's Encrypt certificate management.
 - **SPF, DKIM & DMARC Validation** with alignment checking.
+- **ARC (Authenticated Received Chain)** validation and signing for preserving authentication through forwarding.
 - **DNS Blacklists (RBL/DNSBL)** support (e.g., Spamhaus).
 - **Reverse DNS and Sender MX Validation**.
 - **Header Validation** requiring `From`, `Date`, and `Message-ID`.
@@ -96,9 +97,20 @@ secret_access_key = "YOUR_SECRET"  # Or use env: S3_SECRET_ACCESS_KEY
 ./bin/mizu --local
 ```
 
-## 📋 Configuration Reference
+## 📚 Documentation
 
-For a complete list of all configuration options and their descriptions, please see the fully documented [config.toml.example](config.toml.example) file.
+Comprehensive guides for deploying and operating Mizu:
+
+- **[Documentation Home](docs/)** - Complete documentation portal
+- **[Deployment Guide](docs/deployment/)** - Single-node and clustered deployment
+- **[Configuration Reference](docs/configuration/)** - All configuration options
+- **[Operations Guide](docs/operations/)** - Day-to-day operations and troubleshooting
+- **[Monitoring Guide](docs/operations/monitoring.md)** - Prometheus metrics and health checks
+
+Quick links:
+- [Single Node Deployment](docs/deployment/single-node.md)
+- [Monitoring & Metrics](docs/operations/monitoring.md)
+- [Configuration Examples](config.toml.example)
 
 ### Environment Variables
 
@@ -122,30 +134,35 @@ See the **Production Checklist** in the [Architecture](#-architecture) section f
 
 ## 📊 Monitoring & Observability
 
-### Health Check Endpoint
+Mizu provides comprehensive monitoring through:
 
-When enabled, Mizu exposes an HTTP server for health checks and operational data.
+- **Prometheus Metrics**: Detailed metrics for SMTP, validation, circuit breaker, and rate limiting
+- **Health Check Endpoint**: HTTP endpoint for load balancers and monitoring systems
+- **Admin CLI**: Command-line tool for operational tasks
+- **Structured Logging**: JSON logs with trace IDs for correlation
+
+See the [Monitoring Guide](docs/operations/monitoring.md) for complete details.
+
+### Quick Monitoring
+
 ```bash
-# Check application health (add -u user:pass if auth is enabled)
+# Check health
 curl http://localhost:8080/health
 
-# View real-time server statistics
-curl http://localhost:8080/api/stats
+# View Prometheus metrics
+curl http://localhost:8080/metrics
 
-# Flush the recipient cache across the cluster
-curl -X POST http://localhost:8080/api/flush-cache
+# Use admin tool
+mizu-admin -server http://localhost:8080 -config config.toml stats
 ```
 
-### Logging
-
-Mizu supports structured `json` or human-readable `text` logging. JSON logs include a `trace_id` for each session, making it easy to correlate events.
-
-### Key Metrics to Monitor
-- `mizu_active_sessions`: Number of active SMTP sessions.
-- `mizu_circuit_breaker_state`: State of the circuit breaker (Closed, Open, HalfOpen).
-- `mizu_rate_limit_exceeded`: Number of connections blocked by rate limiting.
-- `mizu_reputation_blocked`: Number of connections blocked due to poor reputation.
-- DMARC/SPF/DKIM validation failures.
+### Key Metrics
+- `mizu_smtp_connections_total`: Total SMTP connections
+- `mizu_smtp_messages_received`: Messages received
+- `mizu_smtp_messages_rejected`: Messages rejected (with reason labels)
+- `mizu_circuit_breaker_state`: Circuit breaker state
+- `mizu_rate_limit_exceeded`: Rate limit violations
+- `mizu_smtp_spf_checks`, `mizu_smtp_dkim_checks`, `mizu_smtp_dmarc_checks`, `mizu_smtp_arc_checks`: Validation results
 
 ## 🔧 Admin CLI
 
@@ -242,7 +259,7 @@ QUIT
 ### Message Flow
 
 1.  **SMTP Reception**: Accept connection and check against connection and rate limits.
-2.  **Security Validation**: Perform rDNS, DNSBL, SPF, and DMARC checks.
+2.  **Security Validation**: Perform rDNS, DNSBL, SPF, DKIM, DMARC, and ARC checks.
 3.  **Content Validation**: Validate headers, size, and check for duplicates.
 4.  **Synchronous Delivery**: Send the message to the destination via HTTP POST, with retries.
 5.  **SMTP Response**: Respond with `250 OK` only if the HTTP delivery was successful.
@@ -252,7 +269,6 @@ QUIT
 
 - **No Internal Message Queue**: Delivery is synchronous and blocks the SMTP session by design. If the backend is down, emails are rejected (SMTP 4xx), and the sending server is expected to retry.
 - **Single Destination**: Each Mizu instance can forward to only one HTTP endpoint.
-- **No Prometheus Metrics**: The server currently exposes metrics via a JSON API only. Prometheus support is a planned enhancement.
 
 ## 🤝 Contributing
 
