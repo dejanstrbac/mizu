@@ -130,6 +130,14 @@ type ForwardingConfig struct {
 	MaxRetryAttempts   int                  `toml:"max_retry_attempts"`   // Max retries (used by queue, default: 5)
 	HTTPTimeoutSeconds int                  `toml:"http_timeout_seconds"` // HTTP client timeout in seconds (default: 30)
 	CircuitBreaker     CircuitBreakerConfig `toml:"circuit_breaker"`      // Circuit breaker for forwarding endpoint
+	SRS                SRSConfig            `toml:"srs"`                  // Sender Rewriting Scheme configuration
+}
+
+// SRSConfig holds configuration for Sender Rewriting Scheme (SRS)
+type SRSConfig struct {
+	Enabled bool   `toml:"enabled"` // Enable SRS for forwarded emails
+	Domain  string `toml:"domain"`  // Domain to use for SRS addresses (e.g., "relay.mizu.com")
+	Secret  string `toml:"secret"`  // Secret key for SRS HMAC (or use SRS_SECRET env var)
 }
 
 // QueueConfig holds configuration for async delivery queue (used with routing)

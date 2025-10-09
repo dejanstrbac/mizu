@@ -26,6 +26,7 @@ import (
 	"migadu/mizu/pkg/queue"
 	"migadu/mizu/pkg/routing"
 	"migadu/mizu/pkg/smtp"
+	"migadu/mizu/pkg/srs"
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/storage"
 	tlsmgr "migadu/mizu/pkg/tls"
@@ -348,6 +349,26 @@ func main() {
 			zap.String("data_dir", dataDir))
 	}
 
+	// Initialize SRS rewriter if forwarding + SRS enabled
+	var srsRewriter smtp.SRSRewriter
+	if cfg.Forwarding.Enabled && cfg.Forwarding.SRS.Enabled {
+		srsSecret := cfg.Forwarding.SRS.Secret
+		if srsSecret == "" {
+			// Try environment variable
+			srsSecret = os.Getenv("SRS_SECRET")
+		}
+		if srsSecret == "" {
+			logger.Fatal("SRS enabled but no secret provided (set forwarding.srs.secret or SRS_SECRET env var)")
+		}
+		if cfg.Forwarding.SRS.Domain == "" {
+			logger.Fatal("SRS enabled but no domain provided (set forwarding.srs.domain)")
+		}
+
+		srsRewriter = srs.NewRewriter(srsSecret, cfg.Forwarding.SRS.Domain)
+		logger.Info("SRS (Sender Rewriting Scheme) enabled for forwarding",
+			zap.String("domain", cfg.Forwarding.SRS.Domain))
+	}
+
 	// Create the backend that handles SMTP protocol logic with connection tracking
 	var activeSessionsWg sync.WaitGroup
 	var activeSessionCount atomic.Int64
@@ -370,6 +391,7 @@ func main() {
 		ARCSigner:          arcSigner,     // Add ARC signer (nil if disabled)
 		RoutingClient:      routingClient, // Add routing client (nil if disabled)
 		DeliveryQueue:      deliveryQueue, // Add delivery queue (nil if disabled)
+		SRSRewriter:        srsRewriter,   // Add SRS rewriter (nil if disabled)
 	}
 
 	// Run the SMTP server and wait for it to complete

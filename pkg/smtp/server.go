@@ -96,6 +96,14 @@ type Backend struct {
 	ARCSigner          *validation.ARCSigner // Optional: ARC signer for adding ARC headers
 	RoutingClient      RoutingClient         // Optional: Routing/aliasing client
 	DeliveryQueue      DeliveryQueue         // Optional: Async delivery queue (used with routing)
+	SRSRewriter        SRSRewriter           // Optional: SRS rewriter for forwarding
+}
+
+// SRSRewriter defines the interface for Sender Rewriting Scheme operations
+type SRSRewriter interface {
+	Encode(originalAddress string) (string, error)
+	Decode(srsAddress string) (string, error)
+	IsSRSAddress(address string) bool
 }
 
 // DeliveryQueue defines the interface for async email delivery
@@ -372,6 +380,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		arcSigner:      be.ARCSigner,     // Add ARC signer (nil if disabled)
 		routingClient:  be.RoutingClient, // Add routing client (nil if disabled)
 		deliveryQueue:  be.DeliveryQueue, // Add delivery queue (nil if disabled)
+		srsRewriter:    be.SRSRewriter,   // Add SRS rewriter (nil if disabled)
 	}
 
 	sessionCreated = true
@@ -422,6 +431,9 @@ type Session struct {
 	routingClient RoutingClient            // Routing client for recipient validation and aliasing (nil if disabled)
 	routingResult *routing.ResolveResponse // Result from routing lookup (cached during RCPT TO)
 	deliveryQueue DeliveryQueue            // Async delivery queue (nil if disabled)
+
+	// SRS (Sender Rewriting Scheme)
+	srsRewriter SRSRewriter // SRS rewriter for forwarding (nil if disabled)
 }
 
 // SMTP command states for sequence validation
@@ -522,6 +534,9 @@ func (s *Session) Helo(hostname string) error {
 
 // updateTLSState updates the TLS state from the connection
 func (s *Session) updateTLSState() {
+	if s.conn == nil {
+		return
+	}
 	state, ok := s.conn.TLSConnectionState()
 	if ok {
 		s.tlsState = &state
@@ -532,6 +547,11 @@ func (s *Session) updateTLSState() {
 
 // setCommandTimeout sets the deadline for the current command
 func (s *Session) setCommandTimeout(timeout time.Duration) error {
+	// Skip timeout if no connection (e.g., in tests)
+	if s.conn == nil {
+		return nil
+	}
+
 	// Check if session deadline has been exceeded
 	select {
 	case <-s.ctx.Done():
@@ -750,6 +770,26 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	}
 
 	s.Logger.Info("RCPT TO", zap.String("to", to), zap.String("remote_addr", s.remoteAddr))
+
+	// Decode SRS addresses if this is an SRS bounce/reply
+	// This converts SRS0=...@relay.mizu.com back to original@example.com
+	if s.srsRewriter != nil && s.srsRewriter.IsSRSAddress(to) {
+		decoded, err := s.srsRewriter.Decode(to)
+		if err != nil {
+			s.Logger.Warn("Failed to decode SRS address",
+				zap.String("srs_address", to),
+				zap.Error(err))
+			return &smtp.SMTPError{
+				Code:         550,
+				EnhancedCode: smtp.EnhancedCode{5, 1, 1},
+				Message:      "invalid SRS address",
+			}
+		}
+		s.Logger.Info("Decoded SRS address",
+			zap.String("srs_address", to),
+			zap.String("original_address", decoded))
+		to = decoded // Use decoded address for all subsequent processing
+	}
 
 	// Enforce single recipient per transaction
 	// This ensures per-recipient validation at the destination and proper retry behavior
@@ -1213,6 +1253,7 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 			IsForwarding:     false,
 			IsCustomEndpoint: isCustomEndpoint,
 			From:             s.from,
+			OriginalFrom:     s.from,  // No SRS for delivery, From == OriginalFrom
 			OriginalTo:       s.to[0], // Original RCPT TO
 			IsJunk:           s.isJunk,
 			MaxAttempts:      0,                // Not used by persistent queue (uses time-based retries)
@@ -1242,6 +1283,23 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 			apiKey = "" // Custom endpoint - no API key (auth should be in URL)
 		}
 
+		// Apply SRS rewriting for forwarding to prevent SPF failures
+		srsFrom := s.from
+		originalFrom := s.from
+		if s.srsRewriter != nil {
+			rewritten, err := s.srsRewriter.Encode(s.from)
+			if err != nil {
+				s.Logger.Warn("Failed to apply SRS rewriting, using original sender",
+					zap.String("from", s.from),
+					zap.Error(err))
+			} else {
+				srsFrom = rewritten
+				s.Logger.Debug("Applied SRS rewriting for forwarding",
+					zap.String("original_from", s.from),
+					zap.String("srs_from", srsFrom))
+			}
+		}
+
 		job := &queue.DeliveryJob{
 			ID:               queue.GenerateJobID(),
 			TraceID:          s.traceID,
@@ -1251,7 +1309,8 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 			APIKey:           apiKey,
 			IsForwarding:     true,
 			IsCustomEndpoint: isCustomEndpoint,
-			From:             s.from,
+			From:             srsFrom,      // SRS-rewritten sender
+			OriginalFrom:     originalFrom, // Keep original for logging
 			OriginalTo:       s.to[0],
 			IsJunk:           s.isJunk,
 			MaxAttempts:      0,                // Not used by persistent queue (uses time-based retries)
@@ -1263,7 +1322,8 @@ func (s *Session) createDeliveryJobs(signedEmail string, routing *routing.Resolv
 		s.Logger.Debug("Created forwarding job",
 			zap.String("job_id", job.ID),
 			zap.String("endpoint", endpoint),
-			zap.Strings("recipients", routing.ForwardTo))
+			zap.Strings("recipients", routing.ForwardTo),
+			zap.String("srs_from", srsFrom))
 	}
 
 	return jobs

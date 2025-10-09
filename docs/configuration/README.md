@@ -9,6 +9,7 @@ Complete reference for all Mizu configuration options.
 - **[TLS & Certificates](tls.md)** - TLS configuration and Let's Encrypt
 - **[Rate Limiting](rate-limiting.md)** - Multi-dimensional rate limiting
 - **[DNS & Validation](dns-validation.md)** - DNS, SPF, DKIM, DMARC
+- **[SRS (Sender Rewriting Scheme)](srs.md)** - Email forwarding without SPF failures
 - **[Clustering](clustering.md)** - Multi-node cluster configuration
 - **[Destination](destination.md)** - Webhook and circuit breaker settings
 - **[Health & Metrics](health-metrics.md)** - Health checks and Prometheus metrics
@@ -225,6 +226,21 @@ limit = 5
 window_seconds = 300
 ```
 
+### Pattern: Email Forwarding with SRS
+
+```toml
+[srs]
+enabled = true
+secret = "${SRS_SECRET}"  # Use environment variable
+domain = "relay.yourdomain.com"
+
+[smtp]
+domain = "relay.yourdomain.com"
+
+[forwarding]
+url = "https://forward-backend.example.com/relay"
+```
+
 ## Configuration Sections
 
 ### Top-Level Options
@@ -272,6 +288,15 @@ Key options:
 - `domains`: Domains for certificates
 - `enable_autocert`: Enable auto-renewal
 - `use_production`: Use LE production vs staging
+
+### Section: [srs]
+
+Sender Rewriting Scheme for email forwarding. See [SRS (Sender Rewriting Scheme)](srs.md).
+
+Key options:
+- `enabled`: Enable SRS rewriting
+- `secret`: HMAC secret for hash generation
+- `domain`: Domain for SRS addresses
 
 ### Section: [cluster]
 

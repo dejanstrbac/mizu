@@ -23,9 +23,10 @@ type DeliveryJob struct {
 	IsCustomEndpoint bool   // true = endpoint from routing response, false = default endpoint
 
 	// Metadata from SMTP session
-	From       string // MAIL FROM address
-	OriginalTo string // Original RCPT TO address (before routing)
-	IsJunk     bool   // Spam classification
+	From         string // MAIL FROM address (may be SRS-rewritten for forwarding)
+	OriginalFrom string // Original MAIL FROM before SRS rewriting (for logging/debugging)
+	OriginalTo   string // Original RCPT TO address (before routing)
+	IsJunk       bool   // Spam classification
 
 	// Retry tracking
 	Attempts    int       // Number of attempts so far

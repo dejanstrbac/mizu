@@ -6,9 +6,13 @@ Welcome to the Mizu SMTP relay documentation. This guide will help you deploy, c
 
 - **[Deployment Guide](deployment/README.md)** - Deploy Mizu for single-node or clustered setups
 - **[Configuration Reference](configuration/README.md)** - Complete configuration options
+- **[HTTP API Documentation](http-api.md)** - Webhook integration guide
 - **[Operations Guide](operations/README.md)** - Day-to-day operations and maintenance
 
 ## Documentation Structure
+
+### Integration
+- [HTTP API Documentation](http-api.md) - Webhook endpoints for routing and delivery
 
 ### Configuration
 - [Configuration Overview](configuration/README.md)
@@ -17,6 +21,7 @@ Welcome to the Mizu SMTP relay documentation. This guide will help you deploy, c
 - [TLS & Certificates](configuration/tls.md)
 - [Rate Limiting](configuration/rate-limiting.md)
 - [DNS & Validation](configuration/dns-validation.md)
+- [SRS (Sender Rewriting Scheme)](configuration/srs.md)
 - [Clustering](configuration/clustering.md)
 
 ### Deployment
