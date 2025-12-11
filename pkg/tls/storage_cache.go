@@ -88,11 +88,13 @@ func (c *StorageCache) Get(ctx context.Context, key string) ([]byte, error) {
 	// Read object data
 	data, err := io.ReadAll(obj)
 	if err != nil {
-		c.logger.Error("Storage-Cache: Failed to read object data",
+		// If we can't read the object data, treat it as a cache miss
+		// This allows autocert to provision a new certificate
+		c.logger.Error("Storage-Cache: Failed to read object data - treating as cache miss",
 			"key", key,
 			"storage_key", storageKey,
 			"error", err)
-		return nil, fmt.Errorf("failed to read object: %w", err)
+		return nil, autocert.ErrCacheMiss
 	}
 
 	c.logger.Info("Storage-Cache: Successfully retrieved certificate", "key", key, "storage_key", storageKey, "bytes", len(data))
