@@ -7,6 +7,8 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"golang.org/x/net/publicsuffix"
 )
 
 const (
@@ -14,16 +16,61 @@ const (
 	MXLookupTimeout = 5 * time.Second
 )
 
-// CheckMXRecord verifies that the domain has valid MX records.
-// This helps prevent spam from domains without proper mail infrastructure.
-// Returns true if the domain has valid MX records, false otherwise.
+// CheckMXRecord verifies that the domain can receive email.
+// Per RFC 5321, this checks for MX records, and if none exist, falls back to A/AAAA records.
+// This validates that the sender's domain can receive bounce messages and replies.
+//
+// Validation is performed in three layers:
+// 1. Blacklist: Reject known invalid/test domains (localhost, example.com, etc.)
+// 2. Public Suffix List: Reject domains with invalid TLDs (.local, .internal, bare TLDs)
+// 3. DNS: Check for MX records, fall back to A/AAAA records
+//
+// Returns true if the domain can receive mail (has MX or A/AAAA records), false otherwise.
 func CheckMXRecord(ctx context.Context, domain string, resolver *net.Resolver, timeout time.Duration) (bool, error) {
 	// Normalize domain: remove any angle brackets and trim whitespace
 	domain = strings.Trim(domain, "<>")
 	domain = strings.TrimSpace(domain)
+	domain = strings.ToLower(domain) // DNS is case-insensitive
 
 	if domain == "" {
 		return false, fmt.Errorf("empty domain")
+	}
+
+	// Reject common invalid/test domains that should never be used for real email
+	// These domains are reserved, local-only, or used for testing per RFC 2606
+	invalidDomains := []string{
+		"localhost",
+		"localhost.localdomain",
+		"example.com", // RFC 2606 - reserved for examples
+		"example.org", // RFC 2606 - reserved for examples
+		"example.net", // RFC 2606 - reserved for examples
+		"test.com",    // Common test domain
+		"test",        // Invalid TLD
+		"invalid",     // RFC 2606 - reserved for invalid domains
+	}
+	for _, invalid := range invalidDomains {
+		if domain == invalid {
+			// Return false (no MX records) rather than an error
+			// This allows the caller to handle it as "no MX records found"
+			return false, nil
+		}
+	}
+
+	// Validate domain structure using Public Suffix List
+	// This catches:
+	// - Domains without valid TLDs (e.g., "test", "foo")
+	// - Domains with invalid TLDs (e.g., "foo.internal")
+	// - Malformed domains
+	publicSuffix, icann := publicsuffix.PublicSuffix(domain)
+	if !icann {
+		// Domain is not under an ICANN-managed TLD (e.g., "test", "local", "internal")
+		// These are private/local domains that can't receive internet mail
+		return false, nil
+	}
+	if publicSuffix == domain {
+		// Domain IS the public suffix (e.g., "com", "co.uk")
+		// Can't send mail from a bare TLD
+		return false, nil
 	}
 
 	// Use default resolver if none provided
@@ -50,18 +97,36 @@ func CheckMXRecord(ctx context.Context, domain string, resolver *net.Resolver, t
 
 		// DNS errors mean no MX records found
 		var dnsErr *net.DNSError
-		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-			return false, nil // No MX records, but not an error
+		if errors.As(err, &dnsErr) {
+			if dnsErr.IsNotFound {
+				return false, nil // No MX records, but not an error
+			}
+			// Log other DNS errors for debugging
+			return false, fmt.Errorf("MX lookup DNS error for domain %s (IsTemporary=%v, IsTimeout=%v): %w",
+				domain, dnsErr.IsTemporary, dnsErr.IsTimeout, err)
 		}
 
 		return false, fmt.Errorf("MX lookup failed for domain %s: %w", domain, err)
 	}
 
 	// Check if we got any MX records
-	if len(mxRecords) == 0 {
-		return false, nil // No MX records found
+	if len(mxRecords) > 0 {
+		return true, nil // Domain has MX records
 	}
 
-	// Domain has valid MX records
-	return true, nil
+	// No MX records found - fall back to A/AAAA records per RFC 5321
+	// If the domain has A or AAAA records, it can receive mail at those addresses
+	addrs, err := resolver.LookupHost(lookupCtx, domain)
+	if err != nil {
+		// No A/AAAA records either
+		return false, nil
+	}
+
+	if len(addrs) > 0 {
+		// Domain has A/AAAA records, can receive mail
+		return true, nil
+	}
+
+	// No MX and no A/AAAA records
+	return false, nil
 }

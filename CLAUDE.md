@@ -121,7 +121,12 @@ Key packages:
    - DKIM validation (verifies email signature)
    - DMARC validation (checks alignment + policy enforcement)
    - ARC validation and signing (Authenticated Received Chain - preserves authentication through forwarding)
-   - MX record validation for sender domains
+   - MX record validation for sender domains:
+     - Checks if sender domain can receive mail (MX records, or A/AAAA fallback per RFC 5321)
+     - Validates sender can receive bounce messages and replies
+     - **Public Suffix List (PSL) validation**: Rejects domains with invalid/private TLDs (e.g., `.internal`, `.local`, bare TLDs)
+     - Blocks reserved/test domains: `localhost`, `example.com`, `example.org`, `example.net`, `test.com`, `test`, `invalid` (per RFC 2606)
+     - Multi-layer validation: blacklist → PSL → DNS (MX/A/AAAA)
 
 9. **Message Header Validation & Fixing** ([pkg/smtp/headers.go](pkg/smtp/headers.go))
    - Configurable handling of missing Message-ID and Date headers via `[server.validation]`

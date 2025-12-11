@@ -811,7 +811,9 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 					mxErr = err
 					// Continue despite lookup error - don't fail on temporary DNS issues
 				} else if !hasMX {
-					s.Logger.Warn("Sender domain has no MX records", "from", from, "domain", senderDomain)
+					s.Logger.Info("Sender domain has no MX records or is invalid/test domain",
+						"from", from,
+						"domain", senderDomain)
 				} else {
 					s.Logger.Debug("Sender domain has valid MX records", "from", from, "domain", senderDomain)
 				}
@@ -822,11 +824,23 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		wg.Wait()
 
 		// Check MX result after parallel execution
-		if s.serverConfig.DNSChecks.RequireSenderMX && senderDomain != "" && mxErr == nil && !hasMX {
-			return &smtp.SMTPError{
-				Code:         550,
-				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
-				Message:      "sender domain has no mail servers (no MX records)",
+		if s.serverConfig.DNSChecks.RequireSenderMX && senderDomain != "" {
+			s.Logger.Debug("MX check result",
+				"from", from,
+				"domain", senderDomain,
+				"has_mx", hasMX,
+				"mx_error", mxErr,
+				"will_reject", mxErr == nil && !hasMX)
+
+			if mxErr == nil && !hasMX {
+				s.Logger.Warn("Rejecting MAIL FROM - sender domain has no MX records",
+					"from", from,
+					"domain", senderDomain)
+				return &smtp.SMTPError{
+					Code:         550,
+					EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+					Message:      "sender domain has no mail servers (no MX records)",
+				}
 			}
 		}
 	}
