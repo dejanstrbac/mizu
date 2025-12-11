@@ -18,13 +18,13 @@ func TestLoadConfig_Defaults(t *testing.T) {
 		t.Fatal("LoadConfig returned nil config")
 	}
 
-	// Verify defaults exist
-	if len(cfg.Servers) == 0 {
-		t.Error("Expected at least one default server")
-	}
-
+	// Verify defaults are set (servers array can be empty if no config file)
 	if cfg.Logging.Format != "console" {
 		t.Errorf("Logging.Format = %s; want console", cfg.Logging.Format)
+	}
+
+	if !cfg.Local {
+		t.Error("Local should be true when --local flag is used")
 	}
 }
 
@@ -101,27 +101,49 @@ log_format = "json"
 func TestLoadEnvVars(t *testing.T) {
 	// Set environment variables
 	os.Setenv("S3_ACCESS_KEY_ID", "test-access-key")
-	os.Setenv("S3_SECRET_ACCESS_KEY", "test-secret-key")
+	os.Setenv("S3_SECRET_KEY", "test-secret-key")
 	os.Setenv("DELIVERY_AUTH_TOKEN", "test-dest-token")
 	os.Setenv("AUTH_TOKEN", "test-auth-token")
 
 	defer func() {
 		os.Unsetenv("S3_ACCESS_KEY_ID")
-		os.Unsetenv("S3_SECRET_ACCESS_KEY")
+		os.Unsetenv("S3_SECRET_KEY")
 		os.Unsetenv("DELIVERY_AUTH_TOKEN")
 		os.Unsetenv("AUTH_TOKEN")
 	}()
 
 	defaultCfg := DefaultConfig()
+
+	// Add a test server to verify delivery token is applied
+	defaultCfg.Servers = []ServerConfig{
+		{
+			Name: "test-relay",
+			Type: "relay",
+			Delivery: DeliveryConfig{
+				AuthToken: "", // Empty to test env var override
+			},
+		},
+		{
+			Name: "test-submission",
+			Type: "submission",
+			Auth: ServerAuthConfig{
+				AuthToken: "", // Empty to test env var override
+			},
+			Delivery: DeliveryConfig{
+				AuthToken: "",
+			},
+		},
+	}
+
 	cfg := &defaultCfg
 	applyEnvironmentVariables(cfg)
 
-	if cfg.Storage.AccessKeyID != "test-access-key" {
-		t.Errorf("Storage.AccessKeyID = %s; want test-access-key", cfg.Storage.AccessKeyID)
+	if cfg.Storage.S3AccessKeyID != "test-access-key" {
+		t.Errorf("Storage.S3AccessKeyID = %s; want test-access-key", cfg.Storage.S3AccessKeyID)
 	}
 
-	if cfg.Storage.SecretAccessKey != "test-secret-key" {
-		t.Errorf("Storage.SecretAccessKey = %s; want test-secret-key", cfg.Storage.SecretAccessKey)
+	if cfg.Storage.S3SecretKey != "test-secret-key" {
+		t.Errorf("Storage.S3SecretKey = %s; want test-secret-key", cfg.Storage.S3SecretKey)
 	}
 
 	if cfg.Servers[0].Delivery.AuthToken != "test-dest-token" {
@@ -224,11 +246,7 @@ func TestValidateConfig_ValidMultiServer(t *testing.T) {
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	// Verify defaults
-	if len(cfg.Servers) == 0 {
-		t.Error("DefaultConfig should have at least one server")
-	}
-
+	// Verify defaults (servers can be empty until config file is loaded)
 	if cfg.Logging.Format != "console" {
 		t.Errorf("Logging.Format = %s; want console", cfg.Logging.Format)
 	}
@@ -243,6 +261,15 @@ func TestDefaultConfig(t *testing.T) {
 
 	if cfg.Storage.Backend != "s3" {
 		t.Errorf("Storage.Backend = %s; want s3", cfg.Storage.Backend)
+	}
+
+	// Verify S3 defaults are set
+	if cfg.Storage.S3Endpoint != "s3.amazonaws.com" {
+		t.Errorf("Storage.S3Endpoint = %s; want s3.amazonaws.com", cfg.Storage.S3Endpoint)
+	}
+
+	if cfg.Storage.S3Region != "us-east-1" {
+		t.Errorf("Storage.S3Region = %s; want us-east-1", cfg.Storage.S3Region)
 	}
 }
 
@@ -351,18 +378,26 @@ func TestValidateConfig_ClusterBindAddr(t *testing.T) {
 			cfg.TLS.Email = "test@example.com"
 			cfg.TLS.Domains = []string{"test.example.com"}
 
+			// Add a test server (DefaultConfig no longer includes servers)
+			cfg.Servers = []ServerConfig{
+				{
+					Name:       "test-server",
+					Type:       "relay",
+					ListenAddr: ":25",
+					Domain:     "test.example.com",
+					Delivery: DeliveryConfig{
+						URL:                "https://test.com",
+						AuthToken:          "test-token",
+						MaxRetryAttempts:   3,
+						HTTPTimeoutSeconds: 30,
+					},
+				},
+			}
+
 			// Enable cluster
 			cfg.Cluster.Enabled = true
 			cfg.Cluster.Addr = tt.addr
 			cfg.Cluster.Port = tt.port
-
-			// Set required fields for all servers
-			for i := range cfg.Servers {
-				cfg.Servers[i].Delivery.URL = "https://test.com"
-				cfg.Servers[i].Delivery.AuthToken = "test-token"
-				cfg.Servers[i].Delivery.MaxRetryAttempts = 3
-				cfg.Servers[i].Delivery.HTTPTimeoutSeconds = 30
-			}
 
 			err := cfg.Validate()
 

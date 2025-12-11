@@ -79,13 +79,13 @@ func CheckMXRecord(ctx context.Context, domain string, resolver *net.Resolver, t
 	if !icann {
 		// Check if it's a known private/invalid TLD that should never be used
 		knownInvalidTLDs := []string{
-			"local",      // RFC 6762 (mDNS/Bonjour)
-			"localhost",  // RFC 6761
-			"internal",   // Common corporate use
-			"invalid",    // RFC 6761
-			"test",       // RFC 6761
-			"example",    // RFC 6761
-			"onion",      // RFC 7686 (Tor)
+			"local",     // RFC 6762 (mDNS/Bonjour)
+			"localhost", // RFC 6761
+			"internal",  // Common corporate use
+			"invalid",   // RFC 6761
+			"test",      // RFC 6761
+			"example",   // RFC 6761
+			"onion",     // RFC 7686 (Tor)
 		}
 		for _, invalidTLD := range knownInvalidTLDs {
 			if publicSuffix == invalidTLD {

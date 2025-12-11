@@ -72,14 +72,14 @@ func (c *Config) Validate() error {
 
 	switch c.Storage.Backend {
 	case "s3":
-		if c.Storage.AccessKeyID == "" || c.Storage.AccessKeyID == "your-s3-access-key-id" {
-			return errors.New("storage.access_key_id must be set when using S3 backend")
+		if c.Storage.S3AccessKeyID == "" || c.Storage.S3AccessKeyID == "your-s3-access-key-id" {
+			return errors.New("storage.s3_access_key_id must be set when using S3 backend")
 		}
-		if c.Storage.SecretAccessKey == "" || c.Storage.SecretAccessKey == "your-s3-secret-access-key" {
-			return errors.New("storage.secret_access_key must be set when using S3 backend")
+		if c.Storage.S3SecretKey == "" || c.Storage.S3SecretKey == "your-s3-secret-key" {
+			return errors.New("storage.s3_secret_key must be set when using S3 backend")
 		}
-		if c.Storage.Bucket == "" {
-			return errors.New("storage.bucket must be set when using S3 backend")
+		if c.Storage.S3Bucket == "" {
+			return errors.New("storage.s3_bucket must be set when using S3 backend")
 		}
 	case "filesystem":
 		if c.Storage.FilesystemPath == "" {

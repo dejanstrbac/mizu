@@ -54,10 +54,10 @@ func LoadConfig(args []string) (*Config, error) {
 func applyEnvironmentVariables(cfg *Config) {
 	// Storage credentials
 	if val := os.Getenv("S3_ACCESS_KEY_ID"); val != "" {
-		cfg.Storage.AccessKeyID = val
+		cfg.Storage.S3AccessKeyID = val
 	}
-	if val := os.Getenv("S3_SECRET_ACCESS_KEY"); val != "" {
-		cfg.Storage.SecretAccessKey = val
+	if val := os.Getenv("S3_SECRET_KEY"); val != "" {
+		cfg.Storage.S3SecretKey = val
 	}
 
 	// Delivery credentials (apply to all servers)

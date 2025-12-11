@@ -330,14 +330,14 @@ type DistributedLimitsConfig struct {
 
 // StorageConfig holds configuration for object storage (S3 or filesystem)
 type StorageConfig struct {
-	Backend         string `toml:"backend"`           // Storage backend: "s3" or "filesystem" (default: "s3")
-	FilesystemPath  string `toml:"filesystem_path"`   // Path for filesystem backend (e.g., "/var/lib/mizu/storage")
-	Endpoint        string `toml:"endpoint"`          // S3 endpoint
-	Bucket          string `toml:"bucket"`            // S3 bucket name
-	Prefix          string `toml:"prefix"`            // S3 key prefix
-	AccessKeyID     string `toml:"access_key_id"`     // S3 access key
-	SecretAccessKey string `toml:"secret_access_key"` // S3 secret key
-	Region          string `toml:"region"`            // S3 region
+	Backend        string `toml:"backend"`          // Storage backend: "s3" or "filesystem" (default: "s3")
+	FilesystemPath string `toml:"filesystem_path"`  // Path for filesystem backend (e.g., "/var/lib/mizu/storage")
+	S3Endpoint     string `toml:"s3_endpoint"`      // S3 endpoint
+	S3Bucket       string `toml:"s3_bucket"`        // S3 bucket name
+	S3Prefix       string `toml:"s3_prefix"`        // S3 key prefix
+	S3AccessKeyID  string `toml:"s3_access_key_id"` // S3 access key
+	S3SecretKey    string `toml:"s3_secret_key"`    // S3 secret key
+	S3Region       string `toml:"s3_region"`        // S3 region
 }
 
 // RecipientValidationConfig holds configuration for recipient validation during RCPT TO
@@ -441,10 +441,10 @@ func DefaultConfig() Config {
 		Storage: StorageConfig{
 			Backend:        "s3",                    // Default to S3
 			FilesystemPath: "/var/lib/mizu/storage", // Default filesystem path
-			Endpoint:       "s3.amazonaws.com",
-			Bucket:         "email-mx-certs",
-			Prefix:         "certs/",
-			Region:         "us-east-1",
+			S3Endpoint:     "s3.amazonaws.com",
+			S3Bucket:       "email-mx-certs",
+			S3Prefix:       "certs/",
+			S3Region:       "us-east-1",
 		},
 		TLS: TLSConfig{
 			Email:         "admin@example.com",

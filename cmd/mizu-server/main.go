@@ -373,35 +373,35 @@ func initStorageBackend(cfg *config.Config, logger *slog.Logger) (storage.Backen
 		backend = fsBackend
 
 	case "s3":
-		logger.Info("Using S3 storage backend", "bucket", cfg.Storage.Bucket)
+		logger.Info("Using S3 storage backend", "bucket", cfg.Storage.S3Bucket)
 		// Initialize S3 client for MinIO (S3-compatible)
 		var err error
-		s3Client, err = minio.New(cfg.Storage.Endpoint, &minio.Options{
-			Creds:  credentials.NewStaticV4(cfg.Storage.AccessKeyID, cfg.Storage.SecretAccessKey, ""),
-			Region: cfg.Storage.Region,
+		s3Client, err = minio.New(cfg.Storage.S3Endpoint, &minio.Options{
+			Creds:  credentials.NewStaticV4(cfg.Storage.S3AccessKeyID, cfg.Storage.S3SecretKey, ""),
+			Region: cfg.Storage.S3Region,
 			Secure: true, // Use HTTPS
 		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to init S3 client: %w", err)
 		}
 
-		s3Backend := storage.NewS3Backend(s3Client, cfg.Storage.Bucket, logger)
+		s3Backend := storage.NewS3Backend(s3Client, cfg.Storage.S3Bucket, logger)
 
 		// Validate S3 credentials early by checking bucket access
-		logger.Info(fmt.Sprintf("Validating S3 access to bucket '%s'...", cfg.Storage.Bucket))
+		logger.Info(fmt.Sprintf("Validating S3 access to bucket '%s'...", cfg.Storage.S3Bucket))
 		exists, err := s3Backend.BucketExists(ctx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to validate S3 credentials/access: %w (check S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY)", err)
+			return nil, nil, fmt.Errorf("failed to validate S3 credentials/access: %w (check S3_ACCESS_KEY_ID and S3_SECRET_KEY)", err)
 		}
 		if !exists {
 			// Bucket doesn't exist - try to create it
-			logger.Info(fmt.Sprintf("Bucket '%s' does not exist, attempting to create it...", cfg.Storage.Bucket))
+			logger.Info(fmt.Sprintf("Bucket '%s' does not exist, attempting to create it...", cfg.Storage.S3Bucket))
 			if err := s3Backend.MakeBucket(ctx); err != nil {
-				return nil, nil, fmt.Errorf("S3 bucket '%s' does not exist and could not be created: %w (ensure credentials have s3:CreateBucket permission)", cfg.Storage.Bucket, err)
+				return nil, nil, fmt.Errorf("S3 bucket '%s' does not exist and could not be created: %w (ensure credentials have s3:CreateBucket permission)", cfg.Storage.S3Bucket, err)
 			}
-			logger.Info(fmt.Sprintf("Successfully created S3 bucket '%s'", cfg.Storage.Bucket))
+			logger.Info(fmt.Sprintf("Successfully created S3 bucket '%s'", cfg.Storage.S3Bucket))
 		} else {
-			logger.Info(fmt.Sprintf("Successfully validated S3 access to bucket '%s'", cfg.Storage.Bucket))
+			logger.Info(fmt.Sprintf("Successfully validated S3 access to bucket '%s'", cfg.Storage.S3Bucket))
 		}
 
 		backend = s3Backend
@@ -455,7 +455,7 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logge
 		Domains:        cfg.TLS.Domains,
 		DefaultDomain:  cfg.TLS.DefaultDomain,
 		StorageBackend: storageBackend,
-		StoragePrefix:  cfg.Storage.Prefix,
+		StoragePrefix:  cfg.Storage.S3Prefix,
 		IsLeaderF:      isLeaderF,
 		Staging:        !cfg.TLS.UseProduction,
 		RenewBefore:    renewBefore,
@@ -553,7 +553,7 @@ func startHealthServer(cfg *config.Config, logger *slog.Logger, statsManager *st
 		checkers = append(checkers, connTracker)
 	}
 	if s3Client != nil {
-		checkers = append(checkers, health.NewCheckS3Connection(s3Client, cfg.Storage.Bucket))
+		checkers = append(checkers, health.NewCheckS3Connection(s3Client, cfg.Storage.S3Bucket))
 	}
 	// Check delivery URLs for each server
 	if !cfg.Local {
@@ -641,13 +641,13 @@ func startStatsLoops(ctx context.Context, statsMgr *stats.Manager, s3Client *min
 
 	// Start export loop
 	logging.SafeGo(logger, "stats-export-loop", func() {
-		statsMgr.StartExportLoop(ctx, s3Client, cfg.Storage.Bucket, cfg.Storage.Prefix,
+		statsMgr.StartExportLoop(ctx, s3Client, cfg.Storage.S3Bucket, cfg.Storage.S3Prefix,
 			hostname, time.Duration(cfg.Stats.SyncIntervalSeconds)*time.Second)
 	})
 
 	// Start sync loop
 	logging.SafeGo(logger, "stats-sync-loop", func() {
-		statsMgr.StartSyncLoop(ctx, s3Client, cfg.Storage.Bucket, cfg.Storage.Prefix,
+		statsMgr.StartSyncLoop(ctx, s3Client, cfg.Storage.S3Bucket, cfg.Storage.S3Prefix,
 			time.Duration(cfg.Stats.SyncIntervalSeconds)*time.Second)
 	})
 }
@@ -691,8 +691,8 @@ func createServerBackend(
 		distTracker = smtp.NewDistributedTracker(
 			connTracker,
 			s3Client,
-			globalCfg.Storage.Bucket,
-			globalCfg.Storage.Prefix,
+			globalCfg.Storage.S3Bucket,
+			globalCfg.Storage.S3Prefix,
 			smtp.DistributedConfig{
 				Hostname:          nodeName,
 				Cluster:           clusterMgr,
@@ -1039,8 +1039,7 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 	case <-ctx.Done():
 		logger.Info("Shutting down server", "server", serverCfg.Name)
 
-		// Graceful shutdown
-		close(be.ShutdownChan)
+		// Graceful shutdown - ShutdownChan is closed by main shutdown coordinator
 		listener.Close()
 
 		// Wait for active sessions
