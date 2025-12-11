@@ -46,6 +46,9 @@ max_recipients_per_message = 100     # Maximum recipients per message (default: 
 timeout_seconds = 10
 shutdown_timeout_seconds = 60
 
+# Debugging
+debug = false                        # Enable SMTP protocol debug logging (shows all SMTP commands and responses)
+
 # Connection Limits
 [server.limits]
 max_connections = 100                # Total connections for this server
@@ -154,6 +157,9 @@ domain = "submit.example.com"
 # Timeouts
 timeout_seconds = 10
 shutdown_timeout_seconds = 60
+
+# Debugging
+debug = false                        # Enable SMTP protocol debug logging
 
 # Message Processing
 max_message_size = 52428800          # 50MB (larger for user submissions)
@@ -304,6 +310,9 @@ listen_addr = ":587"
 # Timeouts
 timeout_seconds = 10
 shutdown_timeout_seconds = 60
+
+# Debugging
+debug = false                        # Enable SMTP protocol debug logging
 
 # Message Processing
 max_message_size = 52428800          # 50MB

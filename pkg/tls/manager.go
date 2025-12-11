@@ -20,6 +20,7 @@ type Manager struct {
 	autocertManager *autocert.Manager
 	logger          *slog.Logger
 	stopCertSync    chan struct{} // Signal to stop certificate sync worker
+	tlsConfig       *tls.Config   // Cached TLS config with wrapped GetCertificate
 }
 
 // Config holds configuration for TLS manager
@@ -113,14 +114,16 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 		logger.Info("TLS manager using Let's Encrypt staging environment")
 	}
 
+	// Create TLS config with autocert and logging wrapper
+	// IMPORTANT: We must create this BEFORE the Manager struct so we can store it
+	baseTLSConfig := autocertMgr.TLSConfig()
+
 	m := &Manager{
 		autocertManager: autocertMgr,
 		logger:          logger,
 		stopCertSync:    make(chan struct{}),
+		tlsConfig:       nil, // Will be set below after wrapping GetCertificate
 	}
-
-	// Create TLS config with autocert and logging wrapper
-	baseTLSConfig := autocertMgr.TLSConfig()
 
 	// Wrap GetCertificate with enhanced logging and SNI handling
 	originalGetCert := baseTLSConfig.GetCertificate
@@ -180,6 +183,9 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 
 	logger.Info("Certificates will be stored using storage backend", "prefix", cfg.StoragePrefix)
 
+	// Store the wrapped TLS config in the manager
+	m.tlsConfig = baseTLSConfig
+
 	// Start certificate sync worker if configured
 	if cfg.SyncInterval > 0 {
 		m.startCertificateSyncWorker(cfg.SyncInterval)
@@ -189,11 +195,16 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 }
 
 // TLSConfig returns the TLS configuration for use with HTTP/SMTP servers
+// Returns the cached config with our wrapped GetCertificate function
 func (m *Manager) TLSConfig() *tls.Config {
-	if m == nil || m.autocertManager == nil {
+	if m == nil {
 		return nil
 	}
-	return m.autocertManager.TLSConfig()
+	if m.tlsConfig != nil {
+		m.logger.Debug("TLSConfig retrieved (using cached wrapped config)",
+			"has_get_certificate", m.tlsConfig.GetCertificate != nil)
+	}
+	return m.tlsConfig
 }
 
 // HTTPHandler returns the HTTP handler for ACME HTTP-01 challenges

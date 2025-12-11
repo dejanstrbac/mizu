@@ -54,6 +54,9 @@ type ServerConfig struct {
 	TimeoutSeconds         int `toml:"timeout_seconds"`          // SMTP command timeout (overrides default)
 	ShutdownTimeoutSeconds int `toml:"shutdown_timeout_seconds"` // Graceful shutdown timeout (overrides default)
 
+	// === Debugging ===
+	Debug bool `toml:"debug"` // Enable SMTP protocol debug logging (shows all SMTP commands and responses)
+
 	// === Email Validation ===
 	SPFCheck              bool   `toml:"spf_check"`               // Enable SPF validation
 	DKIMCheck             bool   `toml:"dkim_check"`              // Enable DKIM validation

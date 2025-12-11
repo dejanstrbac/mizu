@@ -946,8 +946,12 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 	server.MaxMessageBytes = int64(serverCfg.MaxMessageSize)
 	server.EnableSMTPUTF8 = true
 
-	// Enable debug logging for go-smtp library to see SMTP protocol details
-	server.Debug = &smtpDebugWriter{logger: logger, serverName: serverCfg.Name}
+	// Enable debug logging if configured
+	if serverCfg.Debug {
+		server.Debug = &smtpDebugWriter{logger: logger, serverName: serverCfg.Name}
+		logger.Info("SMTP protocol debug logging enabled", "server", serverCfg.Name)
+	}
+	// Always enable error logging
 	server.ErrorLog = &smtpErrorLogger{logger: logger, serverName: serverCfg.Name}
 
 	// Configure authentication for submission servers

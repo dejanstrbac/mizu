@@ -74,6 +74,7 @@ Key packages:
    - `Session`: Per-connection handler with complete email validation pipeline
    - Entry point: `Backend.NewSession()` → creates `Session` for each connection
    - Message flow: Connection → rDNS → DNSBL → SPF/DKIM/DMARC/ARC → Header validation → HTTP POST to backend
+   - **Debug logging**: Enable per-server with `debug = true` in `[server]` section to see all SMTP protocol commands and responses
 
 2. **Distributed Coordination** ([pkg/cluster/](pkg/cluster/))
    - Uses **hashicorp/memberlist** for P2P gossip protocol
