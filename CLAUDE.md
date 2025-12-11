@@ -124,9 +124,12 @@ Key packages:
    - MX record validation for sender domains:
      - Checks if sender domain can receive mail (MX records, or A/AAAA fallback per RFC 5321)
      - Validates sender can receive bounce messages and replies
-     - **Public Suffix List (PSL) validation**: Rejects domains with invalid/private TLDs (e.g., `.internal`, `.local`, bare TLDs)
+     - **Public Suffix List (PSL) validation**: Conservative approach prevents false positives from outdated PSL
+       - Always rejects: RFC-defined invalid TLDs (`.local`, `.internal`, `.localhost`, `.invalid`, `.test`, `.example`, `.onion`)
+       - Always rejects: Bare TLDs (`com`, `co.uk`)
+       - Safe with outdated PSL: Unknown TLDs pass through to DNS check
      - Blocks reserved/test domains: `localhost`, `example.com`, `example.org`, `example.net`, `test.com`, `test`, `invalid` (per RFC 2606)
-     - Multi-layer validation: blacklist → PSL → DNS (MX/A/AAAA)
+     - Multi-layer validation: blacklist → PSL (conservative) → DNS (MX/A/AAAA)
 
 9. **Message Header Validation & Fixing** ([pkg/smtp/headers.go](pkg/smtp/headers.go))
    - Configurable handling of missing Message-ID and Date headers via `[server.validation]`

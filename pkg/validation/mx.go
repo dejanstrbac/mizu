@@ -59,18 +59,43 @@ func CheckMXRecord(ctx context.Context, domain string, resolver *net.Resolver, t
 	// Validate domain structure using Public Suffix List
 	// This catches:
 	// - Domains without valid TLDs (e.g., "test", "foo")
-	// - Domains with invalid TLDs (e.g., "foo.internal")
+	// - Domains with invalid TLDs (e.g., "foo.internal", "foo.local")
 	// - Malformed domains
+	//
+	// IMPORTANT: This is a best-effort check. The embedded PSL may be outdated,
+	// so we only reject obviously invalid TLDs that should NEVER be used for
+	// internet email (.local, .internal, .localhost, .invalid, .test, .onion)
 	publicSuffix, icann := publicsuffix.PublicSuffix(domain)
-	if !icann {
-		// Domain is not under an ICANN-managed TLD (e.g., "test", "local", "internal")
-		// These are private/local domains that can't receive internet mail
-		return false, nil
-	}
+
+	// Only reject if domain is a bare TLD
 	if publicSuffix == domain {
 		// Domain IS the public suffix (e.g., "com", "co.uk")
-		// Can't send mail from a bare TLD
+		// Can't send mail from a bare TLD - this is always invalid
 		return false, nil
+	}
+
+	// For non-ICANN TLDs, only reject known-invalid ones
+	// This prevents false positives if PSL is outdated
+	if !icann {
+		// Check if it's a known private/invalid TLD that should never be used
+		knownInvalidTLDs := []string{
+			"local",      // RFC 6762 (mDNS/Bonjour)
+			"localhost",  // RFC 6761
+			"internal",   // Common corporate use
+			"invalid",    // RFC 6761
+			"test",       // RFC 6761
+			"example",    // RFC 6761
+			"onion",      // RFC 7686 (Tor)
+		}
+		for _, invalidTLD := range knownInvalidTLDs {
+			if publicSuffix == invalidTLD {
+				// Definitively invalid - safe to reject
+				return false, nil
+			}
+		}
+		// Unknown non-ICANN TLD - might be a new TLD we don't know about yet
+		// Log for visibility but don't reject
+		// The MX/A lookup will determine if it's real
 	}
 
 	// Use default resolver if none provided
