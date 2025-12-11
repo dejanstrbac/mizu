@@ -54,15 +54,19 @@ type ServerConfig struct {
 	TimeoutSeconds         int `toml:"timeout_seconds"`          // SMTP command timeout (overrides default)
 	ShutdownTimeoutSeconds int `toml:"shutdown_timeout_seconds"` // Graceful shutdown timeout (overrides default)
 
+	// === Email Validation ===
+	SPFCheck              bool   `toml:"spf_check"`               // Enable SPF validation
+	DKIMCheck             bool   `toml:"dkim_check"`              // Enable DKIM validation
+	ARCCheck              bool   `toml:"arc_check"`               // Enable ARC validation
+	DMARCCheck            bool   `toml:"dmarc_check"`             // Enable DMARC validation
+	DMARCRejectAction     string `toml:"dmarc_reject_action"`     // Action for policy=reject: "none", "reject", "junk" (default: "reject")
+	DMARCQuarantineAction string `toml:"dmarc_quarantine_action"` // Action for policy=quarantine: "none", "reject", "junk" (default: "junk")
+
 	// === Nested Configuration Sections ===
 	Validation ServerValidationConfig `toml:"validation"` // Message validation settings (applies to both relay and submission)
 	Auth       ServerAuthConfig       `toml:"auth"`       // Authentication configuration (use auth.required=true to require auth)
 	DNSChecks  ServerDNSChecksConfig  `toml:"dns_checks"` // DNS validation checks (rDNS, MX)
 	Junk       ServerJunkConfig       `toml:"junk"`       // Junk/spam detection configuration
-	SPF        ServerSPFConfig        `toml:"spf"`        // SPF validation configuration
-	DKIM       ServerDKIMConfig       `toml:"dkim"`       // DKIM validation and signing configuration
-	DMARC      ServerDMARCConfig      `toml:"dmarc"`      // DMARC validation configuration
-	ARC        ServerARCConfig        `toml:"arc"`        // ARC validation and signing configuration
 	DNSBL      ServerDNSBLConfig      `toml:"dnsbl"`      // DNS blacklist checking configuration
 
 	// === Rate Limiting (per-server) ===
@@ -165,31 +169,8 @@ type ServerAuthCacheConfig struct {
 	PositiveRevalidationWindow string `toml:"positive_revalidation_window"` // Revalidate successful auth after this duration (default: "30s")
 }
 
-// ServerSPFConfig holds SPF validation configuration
-type ServerSPFConfig struct {
-	Enabled bool `toml:"enabled"` // Enable SPF validation
-}
-
-// ServerDKIMConfig holds DKIM validation configuration
-type ServerDKIMConfig struct {
-	Enabled bool `toml:"enabled"` // Enable DKIM validation
-}
-
-// ServerDMARCConfig holds DMARC validation configuration
-type ServerDMARCConfig struct {
-	Enabled                bool   `toml:"enabled"`                  // Enable DMARC validation
-	RejectPolicyAction     string `toml:"reject_policy_action"`     // Action for policy=reject: "none", "reject", "junk" (default: "reject")
-	QuarantinePolicyAction string `toml:"quarantine_policy_action"` // Action for policy=quarantine: "none", "reject", "junk" (default: "junk")
-}
-
-// ServerARCConfig holds ARC validation and signing configuration
-type ServerARCConfig struct {
-	Enabled        bool   `toml:"enabled"`          // Enable ARC (validation or signing)
-	Mode           string `toml:"mode"`             // Mode: "check" (validate incoming) or "sign" (sign outgoing/forward)
-	Domain         string `toml:"domain"`           // Domain for ARC signature - required for mode=sign
-	Selector       string `toml:"selector"`         // ARC selector - required for mode=sign
-	PrivateKeyPath string `toml:"private_key_path"` // Path to RSA private key for ARC - required for mode=sign
-}
+// Removed: ServerSPFConfig, ServerDKIMConfig, ServerDMARCConfig, ServerARCConfig
+// These are now flattened into ServerConfig as simple boolean/string fields
 
 // ServerDNSBLConfig holds DNS blacklist checking configuration
 type ServerDNSBLConfig struct {

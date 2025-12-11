@@ -98,10 +98,9 @@ type Backend struct {
 	DistTracker        *DistributedTracker // Optional: Distributed connection tracking
 	RateLimiter        *RateLimiter        // Rate limiter to prevent rapid connection attempts
 
-	// Authentication and signing (for submission servers)
-	Authenticator   Authenticator         // Optional: Authenticates users (submission servers)
-	AuthRateLimiter *AuthRateLimiter      // Optional: Auth rate limiter for brute-force protection
-	ARCSigner       *validation.ARCSigner // Optional: ARC signer for adding ARC headers
+	// Authentication (for submission servers)
+	Authenticator   Authenticator    // Optional: Authenticates users (submission servers)
+	AuthRateLimiter *AuthRateLimiter // Optional: Auth rate limiter for brute-force protection
 
 	// Recipient validation
 	RecipientValidator RecipientValidator // Optional: Recipient validator (validates during RCPT TO)
@@ -410,7 +409,6 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		authenticatedUser:  "",                    // No user yet
 		authenticator:      be.Authenticator,      // Authenticator (nil if not submission)
 		authRateLimiter:    be.AuthRateLimiter,    // Auth rate limiter (nil if disabled)
-		arcSigner:          be.ARCSigner,          // ARC signer (nil if disabled)
 		recipientValidator: be.RecipientValidator, // Recipient validator (nil if disabled)
 	}
 
@@ -460,11 +458,8 @@ type Session struct {
 	// Stats tracking
 	senderDomain string // Domain from MAIL FROM for stats
 	spfResult    *validation.SPFResult
-
-	// Validation results for ARC signing
-	dmarcResult *validation.DMARCResult
-	arcResult   *validation.ARCResult
-	arcSigner   *validation.ARCSigner // ARC signer (nil if ARC signing disabled)
+	dmarcResult  *validation.DMARCResult
+	arcResult    *validation.ARCResult
 
 	// Recipient validation
 	recipientValidator RecipientValidator // Recipient validator for validating during RCPT TO (nil if disabled)
@@ -718,7 +713,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		// SPF check in parallel
 		ipStr := stats.GetIPFromRemoteAddr(s.remoteAddr)
 		ip := net.ParseIP(ipStr)
-		if ip != nil {
+		if ip != nil && s.serverConfig.SPFCheck {
 			wg.Add(1)
 			logging.SafeGo(s.Logger, "spf-check", func() {
 				defer wg.Done()
@@ -1024,12 +1019,17 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 	}
 
 	// DMARC validation
-	quarantineAction := s.serverConfig.DMARC.QuarantinePolicyAction
-	if quarantineAction == "" {
-		quarantineAction = "junk" // Default to junk for quarantine
+	var dmarcResult *validation.DMARCResult
+	var err error
+	var quarantineAction string
+	if s.serverConfig.DMARCCheck {
+		quarantineAction = s.serverConfig.DMARCQuarantineAction
+		if quarantineAction == "" {
+			quarantineAction = "junk" // Default to junk for quarantine
+		}
+		dmarcResult, err = validation.CheckDMARC(context.Background(), rawEmail, s.spfResult, quarantineAction, s.Logger)
 	}
-	dmarcResult, err := validation.CheckDMARC(context.Background(), rawEmail, s.spfResult, quarantineAction, s.Logger)
-	s.dmarcResult = dmarcResult // Store for ARC signing
+	s.dmarcResult = dmarcResult
 	if err != nil {
 		s.Logger.Warn("DMARC validation error", "error", err)
 		if s.metrics != nil {
@@ -1047,7 +1047,7 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 
 		// Handle DMARC policy=reject failures based on configured action
 		if !dmarcResult.Pass && dmarcResult.Policy == "reject" {
-			rejectAction := s.serverConfig.DMARC.RejectPolicyAction
+			rejectAction := s.serverConfig.DMARCRejectAction
 			if rejectAction == "" {
 				rejectAction = "reject" // Default to reject for reject policy
 			}
@@ -1095,9 +1095,9 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 
 	// ARC (Authenticated Received Chain) validation
 	// ARC preserves email authentication results through forwarding intermediaries
-	if s.serverConfig.ARC.Enabled && (s.serverConfig.ARC.Mode == "" || s.serverConfig.ARC.Mode == "check") {
+	if s.serverConfig.ARCCheck {
 		arcResult, err := validation.CheckARC(context.Background(), rawEmail, s.Logger)
-		s.arcResult = arcResult // Store for ARC signing
+		s.arcResult = arcResult
 		if err != nil {
 			s.Logger.Warn("ARC validation error", "error", err)
 			if s.metrics != nil {
@@ -1217,22 +1217,9 @@ func (s *Session) deliverMessage(rawEmail string) error {
 		s.Logger.Debug("Fixed missing headers if needed")
 	}
 
-	// Step 2: Sign email with ARC if enabled
-	// ARC signature covers the complete message including our added headers
-	signedEmail := emailWithHeaders
-	if s.arcSigner != nil && s.serverConfig.ARC.Enabled && s.serverConfig.ARC.Mode == "sign" {
-		var err error
-		signedEmail, err = s.arcSigner.SignEmail(signedEmail, s.spfResult, s.dmarcResult, s.arcResult)
-		if err != nil {
-			s.Logger.Warn("Failed to sign email with ARC", "error", err)
-			// Don't fail delivery on ARC signing error, just log and continue
-		} else {
-			s.Logger.Debug("Email signed with ARC headers")
-		}
-	}
-
-	// Step 3: Deliver message synchronously
-	return s.deliverSynchronous(signedEmail)
+	// ARC signing removed - Mizu is SMTP-to-HTTP relay, never forwards messages
+	// Deliver message synchronously (no ARC signing needed)
+	return s.deliverSynchronous(emailWithHeaders)
 }
 
 // deliverSynchronous handles synchronous delivery

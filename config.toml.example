@@ -71,28 +71,13 @@ apply_action = "header"                    # Action when junk detected: "header"
 subject_pattern = "[spam] %s"              # Subject pattern for "subject" action (original subject replaces %s)
 header = "X-Spam"                          # Header to add for "header" action
 
-# SPF Validation
-[server.spf]
-enabled = true                       # Enable SPF validation
-
-# DKIM Validation
-[server.dkim]
-enabled = true                       # Enable DKIM validation
-
-# DMARC Validation
-[server.dmarc]
-enabled = true                       # Enable DMARC validation
-reject_policy_action = "reject"      # Action for policy=reject: "none", "reject", "junk"
-quarantine_policy_action = "junk"    # Action for policy=quarantine: "none", "reject", "junk"
-
-# ARC Validation/Signing
-[server.arc]
-enabled = true                       # Enable ARC (validation or signing)
-mode = "check"                       # Mode: "check" (validate incoming) or "sign" (sign for forwarding)
-# For mode="sign", also configure:
-# domain = "example.com"
-# selector = "arc"
-# private_key_path = "/etc/mizu/arc-private.pem"
+# Email Authentication Checks
+spf_check = true                     # Enable SPF validation
+dkim_check = true                    # Enable DKIM validation
+arc_check = true                     # Enable ARC validation
+dmarc_check = true                   # Enable DMARC validation
+dmarc_reject_action = "reject"       # Action for DMARC policy=reject: "none" (no action), "reject" (reject email), "junk" (mark as junk)
+dmarc_quarantine_action = "junk"     # Action for DMARC policy=quarantine: "none" (no action), "reject" (reject email), "junk" (mark as junk)
 
 # DNS Blacklist Checking
 [server.dnsbl]
@@ -262,21 +247,11 @@ cluster_sync_enabled = true                        # Enable cluster-wide sync (d
 sync_blocks = true                                 # Sync IP blocks across cluster (default: true)
 sync_failure_counts = true                         # Sync progressive delay counts across cluster (default: true)
 
-# SPF - Disabled for submission (users are authenticated)
-[server.spf]
-enabled = false
-
-# DKIM - Disabled for submission (no need to validate for authenticated users)
-[server.dkim]
-enabled = false
-
-# DMARC - Disabled for submission
-[server.dmarc]
-enabled = false
-
-# ARC Signing - Disabled for submission
-[server.arc]
-enabled = false
+# Email Authentication - Disabled for submission (users are authenticated)
+spf_check = false
+dkim_check = false
+arc_check = false
+dmarc_check = false
 
 # DNSBL - Disabled for submission (users are authenticated)
 [server.dnsbl]
@@ -386,17 +361,11 @@ max_attempts_per_ip = 50                           # Failures before blocking en
 ip_block_duration = "30m"                          # Block duration for IP
 cluster_sync_enabled = true                        # Sync blocks across cluster
 
-[server.spf]
-enabled = false
-
-[server.dkim]
-enabled = false
-
-[server.dmarc]
-enabled = false
-
-[server.arc]
-enabled = false
+# Email Authentication - Disabled for submission (users are authenticated)
+spf_check = false
+dkim_check = false
+arc_check = false
+dmarc_check = false
 
 [server.dnsbl]
 enabled = false

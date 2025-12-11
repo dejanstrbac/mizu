@@ -29,7 +29,6 @@ import (
 	"migadu/mizu/pkg/stats"
 	"migadu/mizu/pkg/storage"
 	tlsmgr "migadu/mizu/pkg/tls"
-	"migadu/mizu/pkg/validation"
 
 	gosmtp "github.com/emersion/go-smtp"
 	"github.com/minio/minio-go/v7"
@@ -715,24 +714,8 @@ func createServerBackend(
 			"gossip_enabled", serverCfg.RateLimit.GossipEnabled)
 	}
 
-	// Initialize ARC signer if enabled
-	var arcSigner *validation.ARCSigner
-	if serverCfg.ARC.Enabled {
-		var err error
-		arcSigner, err = validation.NewARCSigner(
-			serverCfg.ARC.Domain,
-			serverCfg.ARC.Selector,
-			serverCfg.ARC.PrivateKeyPath,
-			serverLogger,
-		)
-		if err != nil {
-			serverLogger.Error("Failed to initialize ARC signer", "error", err)
-			os.Exit(1)
-		}
-		serverLogger.Info("ARC signing enabled",
-			"domain", serverCfg.ARC.Domain,
-			"selector", serverCfg.ARC.Selector)
-	}
+	// ARC signer removed - Mizu is SMTP-to-HTTP relay, never forwards messages
+	// ARC validation (checking incoming ARC headers) is handled in session.Data()
 
 	// Initialize authenticator if auth is enabled or required
 	var authenticator smtp.Authenticator
@@ -840,7 +823,6 @@ func createServerBackend(
 		RateLimiter:        rateLimiter,
 		Authenticator:      authenticator,
 		AuthRateLimiter:    authRateLimiter,
-		ARCSigner:          arcSigner,
 		RecipientValidator: recipientValidator,
 	}
 }

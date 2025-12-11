@@ -182,34 +182,12 @@ func (s *ServerConfig) Validate() error {
 	}
 
 	// Validate DMARC config
-	if s.DMARC.Enabled {
-		if s.DMARC.RejectPolicyAction != "" && s.DMARC.RejectPolicyAction != "none" && s.DMARC.RejectPolicyAction != "reject" && s.DMARC.RejectPolicyAction != "junk" {
-			return fmt.Errorf("dmarc.reject_policy_action must be 'none', 'reject', or 'junk', got '%s'", s.DMARC.RejectPolicyAction)
+	if s.DMARCCheck {
+		if s.DMARCRejectAction != "" && s.DMARCRejectAction != "none" && s.DMARCRejectAction != "reject" && s.DMARCRejectAction != "junk" {
+			return fmt.Errorf("dmarc_reject_action must be 'none', 'reject', or 'junk', got '%s'", s.DMARCRejectAction)
 		}
-		if s.DMARC.QuarantinePolicyAction != "" && s.DMARC.QuarantinePolicyAction != "none" && s.DMARC.QuarantinePolicyAction != "reject" && s.DMARC.QuarantinePolicyAction != "junk" {
-			return fmt.Errorf("dmarc.quarantine_policy_action must be 'none', 'reject', or 'junk', got '%s'", s.DMARC.QuarantinePolicyAction)
-		}
-	}
-
-	// DKIM validation is always enabled if DKIM.Enabled is true
-	// No additional configuration validation needed
-
-	// Validate ARC config
-	if s.ARC.Enabled {
-		if s.ARC.Mode != "" && s.ARC.Mode != "check" && s.ARC.Mode != "sign" {
-			return fmt.Errorf("arc.mode must be 'check' or 'sign', got '%s'", s.ARC.Mode)
-		}
-		// If mode is sign, require signing parameters
-		if s.ARC.Mode == "sign" {
-			if s.ARC.Domain == "" {
-				return errors.New("arc.domain is required when arc.mode='sign'")
-			}
-			if s.ARC.Selector == "" {
-				return errors.New("arc.selector is required when arc.mode='sign'")
-			}
-			if s.ARC.PrivateKeyPath == "" {
-				return errors.New("arc.private_key_path is required when arc.mode='sign'")
-			}
+		if s.DMARCQuarantineAction != "" && s.DMARCQuarantineAction != "none" && s.DMARCQuarantineAction != "reject" && s.DMARCQuarantineAction != "junk" {
+			return fmt.Errorf("dmarc_quarantine_action must be 'none', 'reject', or 'junk', got '%s'", s.DMARCQuarantineAction)
 		}
 	}
 
