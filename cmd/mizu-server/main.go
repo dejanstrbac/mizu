@@ -1006,6 +1006,14 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 	// Configure TLS mode
 	// Note: STARTTLS is always available if TLSConfig is set in go-smtp
 	if serverCfg.IsTLSEnabled() {
+		// Check if global TLS config is available
+		if tlsConfig == nil {
+			logger.Error("Server has TLS enabled but global TLS is not configured",
+				"server", serverCfg.Name,
+				"hint", "Set tls.enabled=true and configure tls.provider in config")
+			return
+		}
+
 		// Clone TLS config for per-server settings
 		serverTLSConfig := tlsConfig.Clone()
 
