@@ -241,6 +241,7 @@ func (fc *FallbackCache) GetFallbackDir() string {
 
 // SyncAllToS3 attempts to sync all certificates from fallback cache to S3.
 // This can be called after S3 becomes available again to ensure consistency.
+// Only syncs certificates that are missing or different in S3 to avoid unnecessary writes.
 func (fc *FallbackCache) SyncAllToS3(ctx context.Context) error {
 	// List all files in fallback directory
 	entries, err := os.ReadDir(fc.fallbackDir)
@@ -250,6 +251,7 @@ func (fc *FallbackCache) SyncAllToS3(ctx context.Context) error {
 
 	synced := 0
 	failed := 0
+	skipped := 0
 
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -267,7 +269,23 @@ func (fc *FallbackCache) SyncAllToS3(ctx context.Context) error {
 			continue
 		}
 
-		// Write to S3
+		// Check if S3 already has this certificate
+		s3Data, err := fc.primary.Get(ctx, name)
+		if err == nil {
+			// Certificate exists in S3 - compare contents
+			if len(s3Data) == len(data) && string(s3Data) == string(data) {
+				// Same certificate - skip
+				skipped++
+				continue
+			}
+			// Different certificate - need to sync
+			fc.logger.Debug("Certificate differs in S3, syncing", "name", name)
+		} else if err != autocert.ErrCacheMiss {
+			// S3 error (not just missing) - log and try to sync anyway
+			fc.logger.Warn("Failed to check S3 certificate (will try to sync)", "name", name, "error", err)
+		}
+
+		// Write to S3 (either missing or different)
 		if err := fc.primary.Put(ctx, name, data); err != nil {
 			fc.logger.Warn("Failed to sync certificate to S3", "name", name, "error", err)
 			failed++
@@ -279,7 +297,7 @@ func (fc *FallbackCache) SyncAllToS3(ctx context.Context) error {
 	}
 
 	if synced > 0 {
-		fc.logger.Info("Synced certificates from fallback cache to S3", "synced", synced, "failed", failed)
+		fc.logger.Info("Synced certificates from fallback cache to S3", "synced", synced, "skipped", skipped, "failed", failed)
 	}
 
 	if failed > 0 {

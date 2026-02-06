@@ -32,11 +32,11 @@ import (
 	"migadu/mizu/pkg/storage"
 	tlsmgr "migadu/mizu/pkg/tls"
 
-	gosmtp "github.com/emersion/go-smtp"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	gosmtp "github.com/emersion/go-smtp"
 )
 
 // Version information, injected at build time

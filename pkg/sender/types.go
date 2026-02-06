@@ -15,8 +15,8 @@ type ValidateResponse struct {
 // Error codes for SMTP responses
 const (
 	// Standard SMTP error codes
-	SMTPSenderNotAuth      = 550 // 5.7.1 Sender not authorized
-	SMTPSenderRejected     = 550 // 5.1.8 Sender rejected
-	SMTPSenderUnavailable  = 550 // 5.1.1 Sender address unavailable
-	SMTPTempFailure        = 451 // 4.3.0 Temporary failure
+	SMTPSenderNotAuth     = 550 // 5.7.1 Sender not authorized
+	SMTPSenderRejected    = 550 // 5.1.8 Sender rejected
+	SMTPSenderUnavailable = 550 // 5.1.1 Sender address unavailable
+	SMTPTempFailure       = 451 // 4.3.0 Temporary failure
 )
