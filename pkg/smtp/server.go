@@ -248,9 +248,10 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 			}
 		}
 
-		// Panic recovery: ensure we call Done() if session creation panics
+		// Ensure we clean up on early returns or panics
 		defer func() {
 			if r := recover(); r != nil {
+				// Panic recovery: ensure we call Done() if session creation panics
 				be.Logger.Error("Panic in NewSession - recovering",
 					"remote_addr", remoteAddr,
 					"panic", r,
@@ -264,6 +265,20 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 				// Re-panic to let go-smtp library handle it
 				panic(r)
+			} else if !sessionCreated {
+				// Early return: clean up WaitGroup and counter
+				if be.ActiveSessionCount != nil {
+					count := be.ActiveSessionCount.Add(-1)
+					be.Logger.Debug("Session count decremented on early return",
+						"active_sessions", count,
+						"remote_addr", remoteAddr)
+
+					// Update Prometheus gauge
+					if be.Metrics != nil {
+						be.Metrics.SMTPConnectionsActive.WithLabelValues(be.ServerConfig.Name, be.ServerConfig.Type).Set(float64(count))
+					}
+				}
+				be.ActiveSessionsWg.Done()
 			}
 		}()
 	}
@@ -1644,6 +1659,11 @@ func (s *Session) Logout() error {
 			s.Logger.Debug("Session count decremented",
 				"active_sessions", count,
 				"remote_addr", s.remoteAddr)
+
+			// Update Prometheus gauge
+			if s.metrics != nil {
+				s.metrics.SMTPConnectionsActive.WithLabelValues(s.serverConfig.Name, s.serverConfig.Type).Set(float64(count))
+			}
 		}
 
 		s.sessionsWg.Done()
