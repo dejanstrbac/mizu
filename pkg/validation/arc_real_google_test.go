@@ -25,7 +25,7 @@ func TestCheckARC_RealGoogleEmail(t *testing.T) {
 		Level: slog.LevelDebug,
 	}))
 
-	result, err := CheckARC(context.Background(), string(rawEmail), logger)
+	result, err := CheckARC(context.Background(), string(rawEmail), nil, logger)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
@@ -77,7 +77,7 @@ func TestCheckARC_RealGoogleEmail_HeaderExtraction(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Parse headers using our extraction function
-	result, err := CheckARC(context.Background(), string(rawEmail), logger)
+	result, err := CheckARC(context.Background(), string(rawEmail), nil, logger)
 	if err != nil {
 		t.Fatalf("Failed to check ARC: %v", err)
 	}

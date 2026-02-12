@@ -31,7 +31,7 @@ This is a test message with ARC headers.
 `
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	result, err := CheckARC(context.Background(), rawEmail, logger)
+	result, err := CheckARC(context.Background(), rawEmail, nil, logger)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
@@ -69,7 +69,7 @@ Message body
 `
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	result, err := CheckARC(context.Background(), rawEmail, logger)
+	result, err := CheckARC(context.Background(), rawEmail, nil, logger)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)

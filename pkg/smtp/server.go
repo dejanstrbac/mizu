@@ -1263,7 +1263,14 @@ func (s *Session) performPreDeliveryChecks(rawEmail string) error {
 	// ARC (Authenticated Received Chain) validation
 	// ARC preserves email authentication results through forwarding intermediaries
 	if s.serverConfig.ARCCheck {
-		arcResult, err := validation.CheckARC(context.Background(), rawEmail, s.Logger)
+		// Create DNS lookup function using session's resolver
+		lookupTXT := func(domain string) ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), validation.DNSLookupTimeout)
+			defer cancel()
+			return s.dnsResolver.LookupTXT(ctx, domain)
+		}
+
+		arcResult, err := validation.CheckARC(context.Background(), rawEmail, lookupTXT, s.Logger)
 		s.arcResult = arcResult
 		if err != nil {
 			s.Logger.Warn("ARC validation error", "error", err)

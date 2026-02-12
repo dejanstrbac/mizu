@@ -25,7 +25,7 @@ This is a test message without ARC headers.
 `
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	result, err := CheckARC(context.Background(), rawEmail, logger)
+	result, err := CheckARC(context.Background(), rawEmail, nil, logger)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
@@ -66,7 +66,7 @@ This is a test message with ARC headers.
 `
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	result, err := CheckARC(context.Background(), rawEmail, logger)
+	result, err := CheckARC(context.Background(), rawEmail, nil, logger)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
@@ -107,7 +107,7 @@ This is a test message with multiple ARC headers.
 `
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	result, err := CheckARC(context.Background(), rawEmail, logger)
+	result, err := CheckARC(context.Background(), rawEmail, nil, logger)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
@@ -208,7 +208,7 @@ func TestCheckARC_InvalidEmail(t *testing.T) {
 	rawEmail := "invalid email format"
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	_, err := CheckARC(context.Background(), rawEmail, logger)
+	_, err := CheckARC(context.Background(), rawEmail, nil, logger)
 
 	if err == nil {
 		t.Error("Expected error for invalid email format, got nil")
@@ -229,7 +229,7 @@ This is a test message with incomplete ARC headers.
 `
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	result, err := CheckARC(context.Background(), rawEmail, logger)
+	result, err := CheckARC(context.Background(), rawEmail, nil, logger)
 
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
@@ -321,7 +321,7 @@ Body`,
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-			result, err := CheckARC(context.Background(), tt.rawEmail, logger)
+			result, err := CheckARC(context.Background(), tt.rawEmail, nil, logger)
 
 			if err != nil {
 				t.Fatalf("Unexpected error: %v", err)
