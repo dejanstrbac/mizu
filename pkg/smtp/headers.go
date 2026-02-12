@@ -275,3 +275,103 @@ func generateMessageID(domain string) string {
 	timestamp := time.Now().Unix()
 	return fmt.Sprintf("<%s.%d@%s>", randomPart, timestamp, domain)
 }
+
+// LoopDetectionResult contains the result of mail loop detection
+type LoopDetectionResult struct {
+	IsLoop       bool   // True if a loop was detected
+	HopCount     int    // Total number of Received headers (hops)
+	LoopHostname string // The hostname that appears multiple times (if IsLoop=true)
+}
+
+// detectMailLoop checks for mail loops by examining Received headers
+// A loop is detected if:
+// 1. The server's own hostname appears in any existing Received header, OR
+// 2. The number of Received headers (hops) exceeds maxHops
+//
+// This prevents infinite mail loops where a message bounces between servers.
+// RFC 5321 section 6.3 recommends a hop count limit (typically 100, but we use 30 as default for safety)
+func detectMailLoop(rawEmail, serverHostname string, maxHops int) LoopDetectionResult {
+	result := LoopDetectionResult{}
+
+	// Default maxHops if not set
+	if maxHops <= 0 {
+		maxHops = 30
+	}
+
+	lines := strings.Split(rawEmail, "\r\n")
+	foundHostnameLoop := false
+	currentReceivedHeader := ""
+
+	// Parse all Received headers
+	// Format: "Received: from <client> by <server> ..."
+	// Received headers can be multi-line (RFC 5322 folding - continuation lines start with whitespace)
+	for _, line := range lines {
+		// Stop at end of headers (empty line)
+		if line == "" {
+			// Process the last accumulated Received header
+			if currentReceivedHeader != "" && !foundHostnameLoop {
+				if checkReceivedHeaderForLoop(currentReceivedHeader, serverHostname) {
+					foundHostnameLoop = true
+					result.LoopHostname = serverHostname
+				}
+			}
+			break
+		}
+
+		// Check if this is a new Received header (case-insensitive)
+		if len(line) >= 9 && strings.EqualFold(line[:9], "Received:") {
+			// Process previous Received header if any
+			if currentReceivedHeader != "" {
+				if !foundHostnameLoop && checkReceivedHeaderForLoop(currentReceivedHeader, serverHostname) {
+					foundHostnameLoop = true
+					result.LoopHostname = serverHostname
+				}
+			}
+
+			// Start new Received header
+			result.HopCount++
+			currentReceivedHeader = line
+		} else if currentReceivedHeader != "" && (line[0] == ' ' || line[0] == '\t') {
+			// Continuation of current Received header (RFC 5322 folding)
+			currentReceivedHeader += " " + strings.TrimSpace(line)
+		} else {
+			// This is a different header, process accumulated Received header if any
+			if currentReceivedHeader != "" {
+				if !foundHostnameLoop && checkReceivedHeaderForLoop(currentReceivedHeader, serverHostname) {
+					foundHostnameLoop = true
+					result.LoopHostname = serverHostname
+				}
+				currentReceivedHeader = ""
+			}
+		}
+	}
+
+	// Set loop flag based on findings
+	if foundHostnameLoop {
+		result.IsLoop = true
+		return result
+	}
+
+	// Check if hop count exceeds limit (strictly greater than)
+	if result.HopCount > maxHops {
+		result.IsLoop = true
+		return result
+	}
+
+	return result
+}
+
+// checkReceivedHeaderForLoop checks if a Received header contains our server hostname in the "by" clause
+func checkReceivedHeaderForLoop(receivedHeader, serverHostname string) bool {
+	// Check the "by" clause to see if this server has already processed this message
+	// Format: "Received: from <client> by <server> ..."
+	lowerHeader := strings.ToLower(receivedHeader)
+	lowerHostname := strings.ToLower(serverHostname)
+
+	// Look for "by <hostname>" pattern
+	if strings.Contains(lowerHeader, "by "+lowerHostname) {
+		return true
+	}
+
+	return false
+}

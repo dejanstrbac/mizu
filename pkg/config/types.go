@@ -99,6 +99,8 @@ type ServerLimitsConfig struct {
 type ServerValidationConfig struct {
 	AllowNullSender      bool   `toml:"allow_null_sender"`      // Allow bounce messages with null sender (<>) - typically true for relay, false for submission
 	MissingHeadersAction string `toml:"missing_headers_action"` // Action for missing Message-ID/Date headers: "reject", "fix", "none" (default: "reject" for submission, "fix" for relay)
+	LoopDetection        bool   `toml:"loop_detection"`         // Enable mail loop detection by checking Received headers (default: true)
+	MaxHops              int    `toml:"max_hops"`               // Maximum number of hops (Received headers) before rejecting (default: 30, RFC 5321 recommends 100)
 }
 
 // ServerAuthConfig holds authentication configuration for submission servers

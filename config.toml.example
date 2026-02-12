@@ -6,6 +6,14 @@
 # listen_addr = ":25"
 # reputation_check = true                               # Enable IP reputation checking (default: false) - rejects connections from IPs with poor reputation
 # disable_mizu_headers = false                          # Disable X-Mizu-* headers (keeps Received header, removes X-Mizu-Trace-ID, X-Mizu-Authentication-Results, X-Mizu-Junk)
+#
+# # Email Authentication & Validation
+# spf_check = true                                      # Enable SPF (Sender Policy Framework) validation (default: false)
+# dmarc_check = true                                    # Enable DMARC validation (default: false) - requires SPF check enabled
+# dmarc_reject_action = "reject"                        # Action for DMARC policy=reject: "reject", "junk", "none" (default: "reject")
+# dmarc_quarantine_action = "junk"                      # Action for DMARC policy=quarantine: "reject", "junk", "none" (default: "junk")
+# arc_check = true                                      # Enable ARC (Authenticated Received Chain) validation (default: false) - preserves auth through forwarding
+#
 # [server.sender_validation]
 # enabled = true                                    # Enable sender validation during MAIL FROM
 # url = "https://api.example.com/validate/sender?ip=$ip&from=$email"
@@ -28,6 +36,11 @@
 # http_timeout_seconds = 5                          # HTTP request timeout
 # cache_ttl_seconds = 300                           # Cache successful validations for 5 minutes
 # # Recipient Validation API contract (same as sender validation above)
+# [server.validation]
+# loop_detection = true                             # Enable mail loop detection (default: false) - prevents infinite loops by checking Received headers
+# max_hops = 30                                     # Maximum hops before rejecting as loop (default: 30, RFC 5321 recommends 100)
+# allow_null_sender = true                          # Allow bounce messages with null sender <> (default: true for relay, false for submission)
+# missing_headers_action = "fix"                    # Action for missing Date/Message-ID: "reject", "fix", "none" (default: "reject" for submission, "fix" for relay)
 # [server.delivery]
 # url = "https://backend.example.com/incoming"
 # auth_token = "${DELIVERY_AUTH_TOKEN}"

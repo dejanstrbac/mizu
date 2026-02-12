@@ -465,7 +465,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		ptr:                ptrRecord,
 		from:               "",
 		to:                 make([]string, 0),
-		remoteAddr:         c.Conn().RemoteAddr().String(),
+		remoteAddr:         remoteAddr, // Use the cleaned IP (without port) from line 164
 		serverConfig:       be.ServerConfig,
 		globalConfig:       be.GlobalConfig,
 		tlsState:           tlsState,
@@ -853,6 +853,12 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 		// SPF check in parallel
 		ip := net.ParseIP(s.remoteAddr)
+		if ip == nil {
+			s.Logger.Warn("SPF check skipped - failed to parse IP", "remote_addr", s.remoteAddr, "from", from)
+		} else if !s.serverConfig.SPFCheck {
+			s.Logger.Debug("SPF check disabled in config", "from", from)
+		}
+
 		if ip != nil && s.serverConfig.SPFCheck {
 			wg.Add(1)
 			concurrency.SafeGo(s.Logger, "spf-check", func() {
@@ -1180,6 +1186,51 @@ func (s *Session) handleLocalMode(rawEmail string) error {
 // performPreDeliveryChecks runs all content validation checks (headers, DMARC).
 // It may mark the message as junk or return an SMTPError for a hard rejection.
 func (s *Session) performPreDeliveryChecks(rawEmail string) error {
+	// Mail loop detection (check before other validations to prevent wasting resources)
+	loopDetectionEnabled := s.serverConfig.Validation.LoopDetection
+	if loopDetectionEnabled {
+		maxHops := s.serverConfig.Validation.MaxHops
+		if maxHops <= 0 {
+			maxHops = 30 // Default
+		}
+
+		loopResult := detectMailLoop(rawEmail, s.serverConfig.Hostname, maxHops)
+		if loopResult.IsLoop {
+			if loopResult.LoopHostname != "" {
+				s.Logger.Warn("Mail loop detected - hostname appears in Received headers",
+					"hostname", loopResult.LoopHostname,
+					"hop_count", loopResult.HopCount,
+					"from", s.from)
+				if s.metrics != nil {
+					s.metrics.SMTPMessagesRejected.WithLabelValues(s.serverName(), s.serverType(), "mail_loop").Inc()
+				}
+				return &smtp.SMTPError{
+					Code:         554,
+					EnhancedCode: smtp.EnhancedCode{5, 4, 6},
+					Message:      "mail loop detected - message has already been processed by this server",
+				}
+			} else {
+				s.Logger.Warn("Too many hops detected",
+					"hop_count", loopResult.HopCount,
+					"max_hops", maxHops,
+					"from", s.from)
+				if s.metrics != nil {
+					s.metrics.SMTPMessagesRejected.WithLabelValues(s.serverName(), s.serverType(), "too_many_hops").Inc()
+				}
+				return &smtp.SMTPError{
+					Code:         554,
+					EnhancedCode: smtp.EnhancedCode{5, 4, 6},
+					Message:      fmt.Sprintf("too many hops (%d) - possible mail loop", loopResult.HopCount),
+				}
+			}
+		}
+
+		// Log hop count for monitoring
+		if loopResult.HopCount > 0 {
+			s.Logger.Debug("Mail hop count", "hops", loopResult.HopCount, "max_hops", maxHops)
+		}
+	}
+
 	// Basic header validation (required headers, format)
 	if err := s.validateHeaders(rawEmail); err != nil {
 		return err
