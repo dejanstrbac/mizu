@@ -806,8 +806,8 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		}
 	}
 
-	// Perform sender validation if enabled
-	if s.senderValidator != nil && s.serverConfig.SenderValidation.Enabled {
+	// Perform sender validation if enabled (skip for authenticated sessions - already validated via allowed_from)
+	if !s.isAuthenticated && s.senderValidator != nil && s.serverConfig.SenderValidation.Enabled {
 		result, err := s.senderValidator.ValidateWithContext(s.ctx, s.remoteAddr, s.ptr, s.helo, from, s.authenticatedUser)
 		if err != nil {
 			s.Logger.Warn("Sender validation failed", "from", from, "authenticated_user", s.authenticatedUser, "error", err)
