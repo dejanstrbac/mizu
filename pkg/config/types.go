@@ -266,6 +266,8 @@ type RateLimitConfig struct {
 	Enabled               bool                 `toml:"enabled"`                 // Enable rate limiting (default: true)
 	GossipEnabled         bool                 `toml:"gossip_enabled"`          // Share rate limit state across cluster via gossip (default: false)
 	GossipIntervalSeconds int                  `toml:"gossip_interval_seconds"` // How often to gossip rate limit data in seconds (default: 5)
+	WhitelistedDomains    []string             `toml:"whitelisted_domains"`     // Domains exempt from all rate limits (e.g., ["example.com", "trusted.org"])
+	WhitelistedSenders    []string             `toml:"whitelisted_senders"`     // Email addresses exempt from all rate limits (e.g., ["admin@example.com"])
 	Dimensions            []RateLimitDimension `toml:"dimensions"`              // Rate limit dimensions (e.g., IP, FROM, FROM_DOMAIN, etc.)
 }
 

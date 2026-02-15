@@ -167,6 +167,10 @@ secret_key = ""
 # gossip_enabled = false                    # Share rate limit state across cluster
 # gossip_interval_seconds = 5               # How often to gossip rate limit data
 #
+# # Whitelist Configuration - Exempt trusted domains/senders from ALL rate limits
+# whitelisted_domains = ["example.com", "trusted.org"]           # Domains exempt from rate limits
+# whitelisted_senders = ["admin@example.com", "noreply@app.com"] # Specific email addresses exempt from rate limits
+#
 # # Example: Per-IP rate limiting (100 emails per hour from any single IP)
 # [[server.rate_limit.dimensions]]
 # name = "per_ip"

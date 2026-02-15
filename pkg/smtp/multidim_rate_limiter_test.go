@@ -422,3 +422,225 @@ func TestRateLimiter_GetStats(t *testing.T) {
 		t.Errorf("Expected first dimension name 'per_ip', got %v", dimensions[0]["name"])
 	}
 }
+
+// TestRateLimiter_WhitelistedDomain tests that whitelisted domains bypass rate limits
+func TestRateLimiter_WhitelistedDomain(t *testing.T) {
+	cfg := config.RateLimitConfig{
+		Enabled:               true,
+		GossipEnabled:         false,
+		GossipIntervalSeconds: 5,
+		WhitelistedDomains:    []string{"trusted.com", "example.org"},
+		Dimensions: []config.RateLimitDimension{
+			{
+				Name:          "per_sender",
+				Keys:          []string{"FROM"},
+				Limit:         2,
+				WindowSeconds: 60,
+			},
+		},
+	}
+
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer rl.Shutdown()
+
+	// Non-whitelisted sender should be rate limited after 2 emails
+	ctx := SessionContext{
+		RemoteAddr: "192.168.1.100:12345",
+		From:       "user@nonwhitelisted.com",
+	}
+	for i := 0; i < 2; i++ {
+		if err := rl.CheckRateLimit(ctx); err != nil {
+			t.Fatalf("Email %d should be allowed, got error: %v", i+1, err)
+		}
+	}
+	if err := rl.CheckRateLimit(ctx); err == nil {
+		t.Fatal("3rd email from non-whitelisted domain should be rate limited")
+	}
+
+	// Whitelisted domain should bypass rate limit entirely
+	ctxWhitelisted := SessionContext{
+		RemoteAddr: "192.168.1.200:12345",
+		From:       "admin@trusted.com",
+	}
+	for i := 0; i < 100; i++ {
+		if err := rl.CheckRateLimit(ctxWhitelisted); err != nil {
+			t.Fatalf("Whitelisted domain should bypass rate limit at email %d, got error: %v", i+1, err)
+		}
+	}
+
+	// Second whitelisted domain should also bypass
+	ctxWhitelisted2 := SessionContext{
+		RemoteAddr: "192.168.1.200:12345",
+		From:       "user@example.org",
+	}
+	for i := 0; i < 100; i++ {
+		if err := rl.CheckRateLimit(ctxWhitelisted2); err != nil {
+			t.Fatalf("Second whitelisted domain should bypass rate limit at email %d, got error: %v", i+1, err)
+		}
+	}
+}
+
+// TestRateLimiter_WhitelistedSender tests that whitelisted senders bypass rate limits
+func TestRateLimiter_WhitelistedSender(t *testing.T) {
+	cfg := config.RateLimitConfig{
+		Enabled:               true,
+		GossipEnabled:         false,
+		GossipIntervalSeconds: 5,
+		WhitelistedSenders:    []string{"admin@example.com", "noreply@service.com"},
+		Dimensions: []config.RateLimitDimension{
+			{
+				Name:          "per_sender",
+				Keys:          []string{"FROM"},
+				Limit:         2,
+				WindowSeconds: 60,
+			},
+		},
+	}
+
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer rl.Shutdown()
+
+	// Non-whitelisted sender from same domain should be rate limited
+	ctx := SessionContext{
+		RemoteAddr: "192.168.1.100:12345",
+		From:       "user@example.com",
+	}
+	for i := 0; i < 2; i++ {
+		if err := rl.CheckRateLimit(ctx); err != nil {
+			t.Fatalf("Email %d should be allowed, got error: %v", i+1, err)
+		}
+	}
+	if err := rl.CheckRateLimit(ctx); err == nil {
+		t.Fatal("3rd email from non-whitelisted sender should be rate limited")
+	}
+
+	// Whitelisted sender should bypass rate limit
+	ctxWhitelisted := SessionContext{
+		RemoteAddr: "192.168.1.200:12345",
+		From:       "admin@example.com",
+	}
+	for i := 0; i < 100; i++ {
+		if err := rl.CheckRateLimit(ctxWhitelisted); err != nil {
+			t.Fatalf("Whitelisted sender should bypass rate limit at email %d, got error: %v", i+1, err)
+		}
+	}
+
+	// Second whitelisted sender
+	ctxWhitelisted2 := SessionContext{
+		RemoteAddr: "192.168.1.200:12345",
+		From:       "noreply@service.com",
+	}
+	for i := 0; i < 100; i++ {
+		if err := rl.CheckRateLimit(ctxWhitelisted2); err != nil {
+			t.Fatalf("Second whitelisted sender should bypass rate limit at email %d, got error: %v", i+1, err)
+		}
+	}
+}
+
+// TestRateLimiter_WhitelistCaseInsensitive tests that whitelist matching is case-insensitive
+func TestRateLimiter_WhitelistCaseInsensitive(t *testing.T) {
+	cfg := config.RateLimitConfig{
+		Enabled:               true,
+		GossipEnabled:         false,
+		GossipIntervalSeconds: 5,
+		WhitelistedDomains:    []string{"TrustedDomain.com"},
+		WhitelistedSenders:    []string{"Admin@Example.COM"},
+		Dimensions: []config.RateLimitDimension{
+			{
+				Name:          "per_sender",
+				Keys:          []string{"FROM"},
+				Limit:         2,
+				WindowSeconds: 60,
+			},
+		},
+	}
+
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer rl.Shutdown()
+
+	// Lowercase domain should match
+	ctx1 := SessionContext{
+		RemoteAddr: "192.168.1.100:12345",
+		From:       "user@trusteddomain.com",
+	}
+	for i := 0; i < 10; i++ {
+		if err := rl.CheckRateLimit(ctx1); err != nil {
+			t.Fatalf("Lowercase domain should be whitelisted, got error at email %d: %v", i+1, err)
+		}
+	}
+
+	// Uppercase domain should match
+	ctx2 := SessionContext{
+		RemoteAddr: "192.168.1.100:12345",
+		From:       "USER@TRUSTEDDOMAIN.COM",
+	}
+	for i := 0; i < 10; i++ {
+		if err := rl.CheckRateLimit(ctx2); err != nil {
+			t.Fatalf("Uppercase domain should be whitelisted, got error at email %d: %v", i+1, err)
+		}
+	}
+
+	// Mixed case sender should match
+	ctx3 := SessionContext{
+		RemoteAddr: "192.168.1.100:12345",
+		From:       "aDmIn@eXaMpLe.CoM",
+	}
+	for i := 0; i < 10; i++ {
+		if err := rl.CheckRateLimit(ctx3); err != nil {
+			t.Fatalf("Mixed case sender should be whitelisted, got error at email %d: %v", i+1, err)
+		}
+	}
+}
+
+// TestRateLimiter_WhitelistWithMultipleDimensions tests whitelist with IP and FROM dimensions
+func TestRateLimiter_WhitelistWithMultipleDimensions(t *testing.T) {
+	cfg := config.RateLimitConfig{
+		Enabled:               true,
+		GossipEnabled:         false,
+		GossipIntervalSeconds: 5,
+		WhitelistedDomains:    []string{"trusted.com"},
+		Dimensions: []config.RateLimitDimension{
+			{
+				Name:          "per_ip",
+				Keys:          []string{"IP"},
+				Limit:         3,
+				WindowSeconds: 60,
+			},
+			{
+				Name:          "per_sender",
+				Keys:          []string{"FROM"},
+				Limit:         2,
+				WindowSeconds: 60,
+			},
+		},
+	}
+
+	rl := NewRateLimiter(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer rl.Shutdown()
+
+	// Whitelisted sender should bypass both IP and FROM rate limits
+	ctx := SessionContext{
+		RemoteAddr: "192.168.1.100:12345",
+		From:       "admin@trusted.com",
+	}
+	for i := 0; i < 100; i++ {
+		if err := rl.CheckRateLimit(ctx); err != nil {
+			t.Fatalf("Whitelisted sender should bypass all rate limits at email %d, got error: %v", i+1, err)
+		}
+	}
+
+	// Non-whitelisted sender from same IP should still be subject to limits
+	ctxNonWhitelisted := SessionContext{
+		RemoteAddr: "192.168.1.100:12345",
+		From:       "user@other.com",
+	}
+	for i := 0; i < 2; i++ {
+		if err := rl.CheckRateLimit(ctxNonWhitelisted); err != nil {
+			t.Fatalf("Non-whitelisted sender email %d should be allowed, got error: %v", i+1, err)
+		}
+	}
+	// Should be blocked by FROM limit (2)
+	if err := rl.CheckRateLimit(ctxNonWhitelisted); err == nil {
+		t.Fatal("Non-whitelisted sender should be blocked by FROM limit")
+	}
+}

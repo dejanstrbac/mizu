@@ -291,9 +291,13 @@ telnet localhost 25
 
 ### Rate Limiting
 
-- Multi-dimensional: Can combine keys (IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN)
+- Multi-dimensional: Can combine keys (IP, FROM, FROM_DOMAIN, TO, TO_DOMAIN, AUTHENTICATED_USER)
 - Sliding window algorithm
 - Gossip-based cluster-wide enforcement (optional)
+- Whitelist support: Domains and senders can be exempted from all rate limits
+  - `whitelisted_domains`: Entire domains bypass rate limits (e.g., ["trusted.com"])
+  - `whitelisted_senders`: Specific email addresses bypass rate limits (e.g., ["admin@example.com"])
+  - Case-insensitive matching
 - Configured via `smtp.rate_limit.dimensions` array
 
 ## Development Workflow

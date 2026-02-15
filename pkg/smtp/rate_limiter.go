@@ -26,16 +26,18 @@ type RateLimiterCluster interface {
 // RateLimiter implements a multi-dimensional sliding window rate limiter with memberlist gossip sync.
 // It tracks connection attempts across multiple configurable dimensions (e.g., IP, FROM, TO, combinations).
 type RateLimiter struct {
-	mu             sync.RWMutex
-	enabled        bool
-	dimensions     []dimensionTracker           // Configured rate limit dimensions
-	windows        map[string]*connectionWindow // composite key -> connection window with local/peer counts
-	gossipEnabled  bool
-	gossipInterval time.Duration
-	logger         *slog.Logger
-	cluster        RateLimiterCluster // Memberlist cluster for gossip
-	ctx            context.Context
-	cancel         context.CancelFunc
+	mu                 sync.RWMutex
+	enabled            bool
+	dimensions         []dimensionTracker           // Configured rate limit dimensions
+	windows            map[string]*connectionWindow // composite key -> connection window with local/peer counts
+	gossipEnabled      bool
+	gossipInterval     time.Duration
+	whitelistedDomains map[string]bool // Domains exempt from rate limits
+	whitelistedSenders map[string]bool // Email addresses exempt from rate limits
+	logger             *slog.Logger
+	cluster            RateLimiterCluster // Memberlist cluster for gossip
+	ctx                context.Context
+	cancel             context.CancelFunc
 }
 
 // dimensionTracker tracks a single rate limit dimension
@@ -93,16 +95,29 @@ func NewRateLimiter(rlConfig config.RateLimitConfig, cluster RateLimiterCluster,
 		}
 	}
 
+	// Build whitelist maps for fast lookup
+	whitelistedDomains := make(map[string]bool)
+	for _, domain := range rlConfig.WhitelistedDomains {
+		whitelistedDomains[strings.ToLower(domain)] = true
+	}
+
+	whitelistedSenders := make(map[string]bool)
+	for _, sender := range rlConfig.WhitelistedSenders {
+		whitelistedSenders[strings.ToLower(sender)] = true
+	}
+
 	rl := &RateLimiter{
-		enabled:        rlConfig.Enabled,
-		dimensions:     dimensions,
-		windows:        make(map[string]*connectionWindow),
-		gossipEnabled:  rlConfig.GossipEnabled,
-		gossipInterval: time.Duration(rlConfig.GossipIntervalSeconds) * time.Second,
-		logger:         logger,
-		cluster:        cluster,
-		ctx:            ctx,
-		cancel:         cancel,
+		enabled:            rlConfig.Enabled,
+		dimensions:         dimensions,
+		windows:            make(map[string]*connectionWindow),
+		gossipEnabled:      rlConfig.GossipEnabled,
+		gossipInterval:     time.Duration(rlConfig.GossipIntervalSeconds) * time.Second,
+		whitelistedDomains: whitelistedDomains,
+		whitelistedSenders: whitelistedSenders,
+		logger:             logger,
+		cluster:            cluster,
+		ctx:                ctx,
+		cancel:             cancel,
 	}
 
 	// Register handler for rate limit gossip from peers
@@ -122,6 +137,11 @@ func NewRateLimiter(rlConfig config.RateLimitConfig, cluster RateLimiterCluster,
 func (rl *RateLimiter) CheckRateLimit(sessionCtx SessionContext) error {
 	if !rl.enabled || len(rl.dimensions) == 0 {
 		return nil // Rate limiting disabled
+	}
+
+	// Check if sender is whitelisted (by email or domain)
+	if rl.isWhitelisted(sessionCtx.From) {
+		return nil // Whitelisted sender, skip rate limiting
 	}
 
 	now := time.Now()
@@ -179,6 +199,28 @@ func (rl *RateLimiter) CheckRateLimit(sessionCtx SessionContext) error {
 	}
 
 	return nil
+}
+
+// isWhitelisted checks if a sender email is whitelisted (by exact match or domain)
+func (rl *RateLimiter) isWhitelisted(from string) bool {
+	if from == "" {
+		return false
+	}
+
+	from = strings.ToLower(from)
+
+	// Check exact email match
+	if rl.whitelistedSenders[from] {
+		return true
+	}
+
+	// Check domain match
+	domain := extractDomain(from)
+	if domain != "" && rl.whitelistedDomains[domain] {
+		return true
+	}
+
+	return false
 }
 
 // buildCompositeKey builds a composite key from the specified dimension keys and session context
