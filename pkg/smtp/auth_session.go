@@ -125,6 +125,11 @@ func (s *Session) Auth(mech string) (sasl.Server, error) {
 			s.authRateLimiter.RecordAuthAttempt(s.ctx, remoteIP, user, authenticated && err == nil)
 		}
 
+		if !authenticated {
+			s.Logger.Warn("Authentication failed", "username", user, "reason", err)
+			return fmt.Errorf("invalid credentials")
+		}
+
 		if err != nil {
 			s.Logger.Error("Authentication error", "username", user, "error", err)
 			// Return a temporary failure error that SASL can understand
@@ -134,11 +139,6 @@ func (s *Session) Auth(mech string) (sasl.Server, error) {
 				EnhancedCode: smtp.EnhancedCode{4, 7, 0},
 				Message:      "temporary authentication failure: please try again later",
 			}
-		}
-
-		if !authenticated {
-			s.Logger.Warn("Authentication failed", "username", user)
-			return fmt.Errorf("invalid credentials")
 		}
 
 		// Mark session as authenticated

@@ -106,7 +106,7 @@ func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP stri
 
 			// Password doesn't match cached hash - might be password change
 			// Refetch from backend to verify
-			a.logger.Warn("cached password verification failed, refetching credentials", "username", username)
+			a.logger.Debug("cached password verification failed, refetching credentials", "username", username)
 			a.clearCredCacheEntry(username)
 
 			// Fetch fresh credentials from backend
@@ -118,8 +118,7 @@ func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP stri
 
 			// No password hashes means user not found
 			if len(creds.PasswordHashes) == 0 {
-				a.logger.Warn("user not found", "username", username)
-				return false, nil
+				return false, fmt.Errorf("no such user")
 			}
 
 			// Verify password against fresh credentials
@@ -132,8 +131,7 @@ func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP stri
 
 			// Password still doesn't match - cache fresh credentials
 			a.cacheCredentials(username, creds.PasswordHashes, creds.AllowedFrom)
-			a.logger.Warn("password verification failed after refetch", "username", username)
-			return false, nil
+			return false, fmt.Errorf("password verification failed")
 		}
 	}
 
@@ -149,22 +147,20 @@ func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP stri
 
 	// No password hashes means user not found
 	if len(creds.PasswordHashes) == 0 {
-		a.logger.Warn("user not found", "username", username)
 		if a.authCache != nil {
 			a.authCache.SetFailure(username, password, AuthUserNotFound)
 		}
-		return false, nil
+		return false, fmt.Errorf("no such user")
 	}
 
 	// Verify password against fetched hashes (try all until one matches)
 	if !a.verifyAgainstHashes(creds.PasswordHashes, password) {
-		a.logger.Warn("password verification failed", "username", username)
 		if a.authCache != nil {
 			a.authCache.SetFailure(username, password, AuthInvalidPassword)
 		}
 		// Cache credentials anyway so future attempts can use them
 		a.cacheCredentials(username, creds.PasswordHashes, creds.AllowedFrom)
-		return false, nil
+		return false, fmt.Errorf("password verification failed")
 	}
 
 	// Cache successful authentication
@@ -172,7 +168,7 @@ func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP stri
 	if a.authCache != nil {
 		a.authCache.SetSuccess(username, password)
 	}
-	a.logger.Info("authentication successful", "username", username)
+	a.logger.Info("Authentication successful", "username", username)
 	return true, nil
 }
 

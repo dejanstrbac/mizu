@@ -494,7 +494,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		rateLimiter:        be.RateLimiter,
 		metrics:            be.Metrics,
 		ctx:                ctx,
-		Logger:             be.Logger.With("trace_id", traceID),
+		Logger:             be.Logger.With("trace_id", traceID, "remote_addr", remoteAddr, "remote_host", ptrRecord),
 		cancel:             cancel,
 		sessionsWg:         be.ActiveSessionsWg,
 		sessionCount:       be.ActiveSessionCount,
@@ -608,7 +608,7 @@ func (s *Session) Helo(hostname string) error {
 
 	// Enforce command sequence - HELO/EHLO must be first
 	if s.commandState != stateNew {
-		s.Logger.Warn("Rejecting HELO/EHLO - already received", "remote_addr", s.remoteAddr, "remote_host", s.ptr, "state", int(s.commandState))
+		s.Logger.Warn("Rejecting HELO/EHLO - already received", "state", int(s.commandState))
 		return &smtp.SMTPError{
 			Code:         503,
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
@@ -621,7 +621,7 @@ func (s *Session) Helo(hostname string) error {
 		// Reject if HELO claims to be our own hostname or a subdomain (spoofing attempt)
 		// Case-insensitive check for robustness.
 		if strings.HasSuffix(strings.ToLower(hostname), "."+strings.ToLower(s.serverConfig.Hostname)) || strings.EqualFold(hostname, s.serverConfig.Hostname) {
-			s.Logger.Warn("Rejecting HELO/EHLO - client using our hostname", "remote_addr", s.remoteAddr, "remote_host", s.ptr, "hostname", hostname, "our_hostname", s.serverConfig.Hostname)
+			s.Logger.Warn("Rejecting HELO/EHLO - client using our hostname", "hostname", hostname, "our_hostname", s.serverConfig.Hostname)
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 7, 8},
@@ -631,7 +631,7 @@ func (s *Session) Helo(hostname string) error {
 
 		// Reject localhost or single-label hostnames
 		if hostname == "localhost" || !strings.Contains(hostname, ".") {
-			s.Logger.Warn("Rejecting HELO/EHLO - invalid hostname", "remote_addr", s.remoteAddr, "remote_host", s.ptr, "hostname", hostname)
+			s.Logger.Warn("Rejecting HELO/EHLO - invalid hostname", "hostname", hostname)
 			return &smtp.SMTPError{
 				Code:         550,
 				EnhancedCode: smtp.EnhancedCode{5, 7, 1},
@@ -642,7 +642,7 @@ func (s *Session) Helo(hostname string) error {
 		// Reject bare IP addresses. Per RFC 5321, IP literals must be in brackets.
 		isIPLiteral := strings.HasPrefix(hostname, "[") && strings.HasSuffix(hostname, "]")
 		if !isIPLiteral && net.ParseIP(hostname) != nil {
-			s.Logger.Warn("Rejecting HELO/EHLO - bare IP", "remote_addr", s.remoteAddr, "remote_host", s.ptr, "ip", hostname)
+			s.Logger.Warn("Rejecting HELO/EHLO - bare IP", "ip", hostname)
 			return &smtp.SMTPError{
 				Code:    550,
 				Message: "HELO with bare IP must use [IP] format",
@@ -651,7 +651,7 @@ func (s *Session) Helo(hostname string) error {
 
 		// Check for invalid characters
 		if strings.ContainsAny(hostname, " \t\r\n") {
-			s.Logger.Warn("Rejecting HELO/EHLO - invalid characters", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+			s.Logger.Warn("Rejecting HELO/EHLO - invalid characters")
 			return &smtp.SMTPError{
 				Code:    550,
 				Message: "invalid characters in HELO hostname",
@@ -662,7 +662,7 @@ func (s *Session) Helo(hostname string) error {
 		if s.globalConfig.Blacklists.CheckHELOResolves {
 			resolves, reason, err := blacklist.CheckHELOResolves(hostname, time.Duration(s.globalConfig.Blacklists.TimeoutSeconds)*time.Second)
 			if err != nil || !resolves {
-				s.Logger.Warn("Rejecting HELO/EHLO - hostname check failed", "remote_addr", s.remoteAddr, "remote_host", s.ptr, "hostname", hostname, "reason", reason)
+				s.Logger.Warn("Rejecting HELO/EHLO - hostname check failed", "hostname", hostname, "reason", reason)
 				return &smtp.SMTPError{
 					Code:         550,
 					EnhancedCode: smtp.EnhancedCode{5, 7, 27},
@@ -674,7 +674,7 @@ func (s *Session) Helo(hostname string) error {
 
 	s.helo = hostname
 	s.commandState = stateHelo
-	s.Logger.Info("HELO/EHLO received", "remote_addr", s.remoteAddr, "remote_host", s.ptr, "hostname", hostname)
+	s.Logger.Info("HELO/EHLO received", "hostname", hostname)
 
 	// Reset to idle timeout to wait for the next command
 	if err := s.setCommandTimeout(IdleTimeout); err != nil {
@@ -687,26 +687,20 @@ func (s *Session) Helo(hostname string) error {
 // updateTLSState updates the TLS state from the connection
 func (s *Session) updateTLSState() {
 	if s.conn == nil {
-		s.Logger.Warn("updateTLSState: conn is nil", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+		s.Logger.Warn("updateTLSState: conn is nil")
 		return
 	}
 	state, ok := s.conn.TLSConnectionState()
 	if ok {
 		s.tlsState = &state
-		s.Logger.Info("TLS state updated",
-			"remote_addr", s.remoteAddr,
-			"remote_host", s.ptr,
-			"tls_version", tlsVersionString(state.Version),
+		s.Logger.Info("TLS state updated", "tls_version", tlsVersionString(state.Version),
 			"cipher_suite", fmt.Sprintf("0x%04x", state.CipherSuite),
 			"server_name", state.ServerName,
 			"handshake_complete", state.HandshakeComplete)
 	} else {
-		s.Logger.Warn("TLS state check returned ok=false",
-			"remote_addr", s.remoteAddr,
-			"remote_host", s.ptr,
-			"had_previous_tls", s.tlsState != nil)
+		s.Logger.Warn("TLS state check returned ok=false", "had_previous_tls", s.tlsState != nil)
 		if s.tlsState != nil {
-			s.Logger.Warn("TLS state cleared (was previously set)", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+			s.Logger.Warn("TLS state cleared (was previously set)")
 		}
 		s.tlsState = nil
 	}
@@ -722,7 +716,7 @@ func (s *Session) setCommandTimeout(timeout time.Duration) error {
 	// Check if session deadline has been exceeded
 	select {
 	case <-s.ctx.Done():
-		s.Logger.Warn("Session deadline exceeded", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+		s.Logger.Warn("Session deadline exceeded")
 		return ErrSessionTimeout
 	default:
 		// Set the command timeout
@@ -741,7 +735,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	// Reject null sender <> (bounce messages) to prevent backscatter
 	// Check this FIRST before any other processing for security
 	if s.serverConfig.Junk.RejectNullSender && (from == "" || from == "<>") {
-		s.Logger.Warn("Rejecting null sender", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+		s.Logger.Warn("Rejecting null sender")
 		return &smtp.SMTPError{
 			Code:         550,
 			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
@@ -756,7 +750,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 			// EHLO was handled by go-smtp internally, update our state
 			s.helo = heloHostname
 			s.commandState = stateHelo
-			s.Logger.Debug("HELO/EHLO set via conn.Hostname", "remote_addr", s.remoteAddr, "remote_host", s.ptr, "hostname", heloHostname)
+			s.Logger.Debug("HELO/EHLO set via conn.Hostname", "hostname", heloHostname)
 		}
 	}
 
@@ -767,7 +761,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 	// Check if HELO/EHLO has been received
 	if s.helo == "" {
-		s.Logger.Warn("Rejecting MAIL FROM - no HELO/EHLO", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+		s.Logger.Warn("Rejecting MAIL FROM - no HELO/EHLO")
 		return &smtp.SMTPError{
 			Code:         503,
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
@@ -784,7 +778,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 
 	// Check authentication requirement (for submission servers)
 	if s.serverConfig.Auth.Required && !s.isAuthenticated {
-		s.Logger.Warn("Rejecting MAIL FROM - authentication required", "from", from, "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+		s.Logger.Warn("Rejecting MAIL FROM - authentication required", "from", from)
 		return &smtp.SMTPError{
 			Code:         530,
 			EnhancedCode: smtp.EnhancedCode{5, 7, 0},
@@ -873,7 +867,7 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 		// SPF check in parallel
 		ip := net.ParseIP(s.remoteAddr)
 		if ip == nil {
-			s.Logger.Warn("SPF check skipped - failed to parse IP", "remote_addr", s.remoteAddr, "remote_host", s.ptr, "from", from)
+			s.Logger.Warn("SPF check skipped - failed to parse IP", "from", from)
 		} else if !s.serverConfig.SPFCheck {
 			s.Logger.Debug("SPF check disabled in config", "from", from)
 		}
@@ -990,9 +984,9 @@ func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	}
 
 	if s.tlsState != nil {
-		s.Logger.Info("MAIL FROM", "from", from, "remote_addr", s.remoteAddr, "remote_host", s.ptr, "tls", tlsVersionString(s.tlsState.Version))
+		s.Logger.Info("MAIL FROM", "from", from, "tls", tlsVersionString(s.tlsState.Version))
 	} else {
-		s.Logger.Info("MAIL FROM", "from", from, "remote_addr", s.remoteAddr, "remote_host", s.ptr, "tls", "none")
+		s.Logger.Info("MAIL FROM", "from", from, "tls", "none")
 	}
 
 	// Reset to idle timeout to wait for the next command
@@ -1013,7 +1007,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	// Enforce command sequence - must have MAIL FROM before RCPT TO
 	if s.commandState != stateMail && s.commandState != stateRcpt {
-		s.Logger.Warn("Rejecting RCPT TO - bad sequence", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+		s.Logger.Warn("Rejecting RCPT TO - bad sequence")
 		return &smtp.SMTPError{
 			Code:         503,
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
@@ -1028,7 +1022,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 		return ErrTLSRequired
 	}
 
-	s.Logger.Info("RCPT TO", "to", to, "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+	s.Logger.Info("RCPT TO", "to", to)
 
 	// Check max recipients limit
 	maxRecipients := s.serverConfig.MaxRecipientsPerMessage
@@ -1167,7 +1161,7 @@ func (s *Session) readMessageData(r io.Reader) (string, error) {
 
 	// Enforce command sequence - must have at least one recipient.
 	if s.commandState != stateRcpt {
-		s.Logger.Warn("Rejecting DATA - bad sequence", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+		s.Logger.Warn("Rejecting DATA - bad sequence")
 		return "", &smtp.SMTPError{Code: 503, EnhancedCode: smtp.EnhancedCode{5, 5, 1}, Message: "bad sequence of commands - RCPT TO first"}
 	}
 
@@ -1727,14 +1721,11 @@ func (s *Session) Logout() error {
 	// Ensure connection is always released even if something panics
 	defer func() {
 		if r := recover(); r != nil {
-			s.Logger.Error("Panic in Logout - recovering but connection was released",
-				"remote_addr", s.remoteAddr,
-				"remote_host", s.ptr,
-				"panic", r)
+			s.Logger.Error("Panic in Logout - recovering but connection was released", "panic", r)
 		}
 	}()
 
-	s.Logger.Debug("Session logout", "remote_addr", s.remoteAddr, "remote_host", s.ptr)
+	s.Logger.Debug("Session logout")
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -1751,9 +1742,7 @@ func (s *Session) Logout() error {
 		if s.sessionCount != nil {
 			count := s.sessionCount.Add(-1)
 			s.Logger.Debug("Session count decremented",
-				"active_sessions", count,
-				"remote_addr", s.remoteAddr,
-				"remote_host", s.ptr)
+				"active_sessions", count)
 
 			// Update Prometheus gauge
 			if s.metrics != nil {

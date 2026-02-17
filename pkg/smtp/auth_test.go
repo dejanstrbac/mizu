@@ -76,11 +76,11 @@ func TestHTTPAuthenticator_Authenticate(t *testing.T) {
 		auth := NewHTTPAuthenticator(server.URL, "test-auth-token", logger, nil)
 
 		authenticated, err := auth.Authenticate("testuser@example.com", "wrongpass")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
 		if authenticated {
 			t.Error("expected authentication to fail")
+		}
+		if err == nil {
+			t.Error("expected error describing failure reason")
 		}
 	})
 
@@ -94,11 +94,11 @@ func TestHTTPAuthenticator_Authenticate(t *testing.T) {
 		auth := NewHTTPAuthenticator(server.URL, "test-auth-token", logger, nil)
 
 		authenticated, err := auth.Authenticate("nonexistent@example.com", "testpass")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
 		if authenticated {
 			t.Error("expected authentication to fail for non-existent user")
+		}
+		if err == nil {
+			t.Error("expected error describing failure reason")
 		}
 	})
 
@@ -219,8 +219,11 @@ func TestHTTPAuthenticator_Authenticate(t *testing.T) {
 		// Wrong password should fail
 		auth.clearCredCacheEntry("testuser@example.com")
 		authenticated, err = auth.Authenticate("testuser@example.com", "wrongpassword")
-		if err != nil || authenticated {
+		if authenticated {
 			t.Error("expected wrong password to fail")
+		}
+		if err == nil {
+			t.Error("expected error describing failure reason")
 		}
 	})
 }
@@ -384,11 +387,11 @@ func TestHTTPAuthenticator_PasswordChange(t *testing.T) {
 
 	// Try old password - should refetch (credentials mismatch), fail
 	authenticated, err = auth.Authenticate("testuser@example.com", "oldpass")
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
 	if authenticated {
 		t.Error("old password should fail")
+	}
+	if err == nil {
+		t.Error("expected error describing failure reason")
 	}
 	if callCount != 3 {
 		t.Errorf("expected 3 backend calls (refetch to verify old password is wrong), got %d", callCount)
@@ -396,11 +399,11 @@ func TestHTTPAuthenticator_PasswordChange(t *testing.T) {
 
 	// Try old password again - without auth cache, will refetch again (no brute force protection)
 	authenticated, err = auth.Authenticate("testuser@example.com", "oldpass")
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
 	if authenticated {
 		t.Error("old password should still fail")
+	}
+	if err == nil {
+		t.Error("expected error describing failure reason")
 	}
 	if callCount != 4 {
 		t.Errorf("expected 4 backend calls (no negative caching without auth cache), got %d", callCount)
