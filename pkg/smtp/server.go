@@ -154,6 +154,14 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		// Continue with session creation
 	}
 
+	// If the client sends EHLO/HELO multiple times on the same connection (e.g. after
+	// STARTTLS fails or due to a misbehaving client), the go-smtp library calls NewSession
+	// again without calling Logout on the previous session first. Release the old session's
+	// connection slot now to prevent the counter from leaking.
+	if prev := c.Session(); prev != nil {
+		prev.Logout()
+	}
+
 	// Extract IP without port for all subsequent operations
 	remoteAddrWithPort := c.Conn().RemoteAddr().String()
 	host, _, err := net.SplitHostPort(remoteAddrWithPort)
@@ -546,6 +554,7 @@ type Session struct {
 	cancel         context.CancelFunc     // Cancel function to clean up resources
 	sessionsWg     *sync.WaitGroup        // WaitGroup to track active sessions for graceful shutdown
 	sessionCount   *atomic.Int64          // Pointer to active session counter for observability
+	logoutOnce     sync.Once              // Ensures Logout cleanup runs exactly once
 
 	// Authentication (for submission servers)
 	isAuthenticated   bool             // Whether user has authenticated via SMTP AUTH
@@ -1717,41 +1726,53 @@ func (s *Session) Reset() {
 }
 
 // Logout is called when the session ends.
+// It is idempotent: calling it more than once is safe and only the first call
+// performs cleanup. This is important because NewSession may call prev.Logout()
+// when a client re-issues EHLO, and go-smtp may also call Logout when the
+// connection closes. Without idempotency the second call would double-release
+// the connection tracker slot (leaking negative counts) and call
+// sessionsWg.Done() twice (causing a panic).
 func (s *Session) Logout() error {
-	// Ensure connection is always released even if something panics
-	defer func() {
-		if r := recover(); r != nil {
-			s.Logger.Error("Panic in Logout - recovering but connection was released", "panic", r)
-		}
-	}()
-
-	s.Logger.Debug("Session logout")
-	if s.cancel != nil {
-		s.cancel()
-	}
-	// Release connection slot for DoS protection
-	// Prefer distributed tracker for cluster-wide coordination
-	if s.distTracker != nil {
-		s.distTracker.Release(s.remoteAddr)
-	} else if s.connTracker != nil {
-		s.connTracker.Release(s.remoteAddr)
-	}
-	// Signal that this session has completed (for graceful shutdown)
-	if s.sessionsWg != nil {
-		// Decrement active session counter for observability
-		if s.sessionCount != nil {
-			count := s.sessionCount.Add(-1)
-			s.Logger.Debug("Session count decremented",
-				"active_sessions", count)
-
-			// Update Prometheus gauge
-			if s.metrics != nil {
-				s.metrics.SMTPConnectionsActive.WithLabelValues(s.serverConfig.Name, s.serverConfig.Type).Set(float64(count))
+	s.logoutOnce.Do(func() {
+		// Ensure connection is always released even if something panics.
+		// All cleanup logic lives in this defer so a panic anywhere in
+		// Logout cannot leak counters.
+		defer func() {
+			if r := recover(); r != nil {
+				s.Logger.Error("Panic in Logout - recovering", "panic", r)
 			}
-		}
 
-		s.sessionsWg.Done()
-	}
+			// Release connection slot for DoS protection.
+			// Prefer distributed tracker for cluster-wide coordination.
+			if s.distTracker != nil {
+				s.distTracker.Release(s.remoteAddr)
+			} else if s.connTracker != nil {
+				s.connTracker.Release(s.remoteAddr)
+			}
+
+			// Signal that this session has completed (for graceful shutdown).
+			if s.sessionsWg != nil {
+				// Decrement active session counter for observability.
+				if s.sessionCount != nil {
+					count := s.sessionCount.Add(-1)
+					s.Logger.Debug("Session count decremented",
+						"active_sessions", count)
+
+					// Update Prometheus gauge.
+					if s.metrics != nil {
+						s.metrics.SMTPConnectionsActive.WithLabelValues(s.serverConfig.Name, s.serverConfig.Type).Set(float64(count))
+					}
+				}
+
+				s.sessionsWg.Done()
+			}
+		}()
+
+		s.Logger.Debug("Session logout")
+		if s.cancel != nil {
+			s.cancel()
+		}
+	})
 	return nil
 }
 
