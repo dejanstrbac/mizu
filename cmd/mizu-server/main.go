@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -1265,16 +1266,53 @@ func (w *smtpDebugWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// smtpErrorLogger wraps slog.Logger for go-smtp ErrorLog
+// smtpErrorLogger wraps slog.Logger for go-smtp ErrorLog.
+// It classifies errors: benign connection lifecycle events (EOF, reset, timeout)
+// are logged at DEBUG level to avoid log noise, while genuine errors use ERROR.
 type smtpErrorLogger struct {
 	logger     *slog.Logger
 	serverName string
 }
 
+// containsBenignError inspects the variadic arguments passed by go-smtp's
+// ErrorLog for well-known benign error types. This uses errors.Is / type
+// assertions on the actual error values rather than fragile string matching.
+//
+// Benign errors are normal connection lifecycle events:
+//   - io.EOF: client disconnected (port scanners, health probes, normal close)
+//   - syscall.ECONNRESET: client forcefully closed the connection
+//   - syscall.EPIPE: writing to a connection the client already closed
+//   - os.ErrDeadlineExceeded: idle/session timeout expired (expected)
+//   - net.ErrClosed: connection used after close (race during shutdown)
+func containsBenignError(args []interface{}) bool {
+	for _, arg := range args {
+		err, ok := arg.(error)
+		if !ok {
+			continue
+		}
+		if errors.Is(err, io.EOF) ||
+			errors.Is(err, syscall.ECONNRESET) ||
+			errors.Is(err, syscall.EPIPE) ||
+			errors.Is(err, os.ErrDeadlineExceeded) ||
+			errors.Is(err, net.ErrClosed) {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *smtpErrorLogger) Printf(format string, v ...interface{}) {
+	if containsBenignError(v) {
+		l.logger.Debug("SMTP connection closed", "server", l.serverName, "message", fmt.Sprintf(format, v...))
+		return
+	}
 	l.logger.Error("SMTP error", "server", l.serverName, "message", fmt.Sprintf(format, v...))
 }
 
 func (l *smtpErrorLogger) Println(v ...interface{}) {
+	if containsBenignError(v) {
+		l.logger.Debug("SMTP connection closed", "server", l.serverName, "message", fmt.Sprint(v...))
+		return
+	}
 	l.logger.Error("SMTP error", "server", l.serverName, "message", fmt.Sprint(v...))
 }
