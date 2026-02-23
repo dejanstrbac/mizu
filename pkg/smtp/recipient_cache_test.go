@@ -16,7 +16,7 @@ import (
 func TestRecipientCache_NotFoundCaching(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -59,7 +59,7 @@ func TestRecipientCache_NotFoundCaching(t *testing.T) {
 func TestRecipientCache_BlockedCaching(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -96,7 +96,7 @@ func TestRecipientCache_BlockedCaching(t *testing.T) {
 func TestRecipientCache_Expiry(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -137,7 +137,7 @@ func TestRecipientCache_GossipPropagation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create server 1
-	local1 := NewConnectionTracker(100, 10)
+	local1 := NewConnectionTracker(100, 10, 0, nil)
 	dt1 := NewDistributedTracker(
 		local1,
 		nil,
@@ -155,7 +155,7 @@ func TestRecipientCache_GossipPropagation(t *testing.T) {
 	)
 
 	// Create server 2
-	local2 := NewConnectionTracker(100, 10)
+	local2 := NewConnectionTracker(100, 10, 0, nil)
 	dt2 := NewDistributedTracker(
 		local2,
 		nil,
@@ -218,7 +218,7 @@ func TestRecipientCache_GossipPropagation(t *testing.T) {
 func TestRecipientCache_MergeStrategy(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -273,7 +273,7 @@ func TestRecipientCache_HTTPEndToEnd(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Create server 1 with HTTP handler
-	local1 := NewConnectionTracker(100, 10)
+	local1 := NewConnectionTracker(100, 10, 0, nil)
 	dt1 := NewDistributedTracker(
 		local1,
 		nil,
@@ -295,7 +295,7 @@ func TestRecipientCache_HTTPEndToEnd(t *testing.T) {
 	dt1.CacheRecipientBlocked("user2@example.com")
 
 	// Create server 2
-	local2 := NewConnectionTracker(100, 10)
+	local2 := NewConnectionTracker(100, 10, 0, nil)
 	mockCluster2 := newMockCluster()
 	dt2 := NewDistributedTracker(
 		local2,
@@ -340,7 +340,7 @@ func TestRecipientCache_TwoServerIntegration(t *testing.T) {
 	mockClusters := make([]*mockCluster, 2)
 
 	for i := 0; i < 2; i++ {
-		local := NewConnectionTracker(100, 10)
+		local := NewConnectionTracker(100, 10, 0, nil)
 		mockCluster := newMockCluster()
 		mockClusters[i] = mockCluster
 
@@ -449,7 +449,7 @@ func TestRecipientCache_TwoServerIntegration(t *testing.T) {
 func TestRecipientCache_CleanupExpiredEntries(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	dt := NewDistributedTracker(
 		local,
 		nil,
@@ -510,7 +510,7 @@ func TestRecipientCache_CleanupExpiredEntries(t *testing.T) {
 func TestRecipientCache_ConcurrentAccess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	dt := NewDistributedTracker(
 		local,
 		nil,

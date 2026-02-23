@@ -47,7 +47,7 @@ func TestBackend_EarlyReturn_WaitGroupLeak(t *testing.T) {
 
 	metricsRegistry := metrics.New("test_early_return_leak")
 	resolver, _ := NewDNSResolver(nil, 1*time.Second, 5*time.Minute)
-	tracker := NewConnectionTracker(100, 10)
+	tracker := NewConnectionTracker(100, 10, 0, nil)
 
 	// Create WaitGroup and counter - this is what we're testing
 	var wg sync.WaitGroup
@@ -139,7 +139,7 @@ func TestBackend_EarlyReturn_MultipleRejects(t *testing.T) {
 	// Track across multiple simulated rejections
 	var wg sync.WaitGroup
 	var sessionCount atomic.Int64
-	tracker := NewConnectionTracker(100, 10)
+	tracker := NewConnectionTracker(100, 10, 0, nil)
 
 	// Simulate 20 rapid connection attempts that all get rejected early
 	for i := 0; i < 20; i++ {

@@ -7,6 +7,11 @@
 # reputation_check = true                               # Enable IP reputation checking (default: false) - rejects connections from IPs with poor reputation
 # disable_mizu_headers = false                          # Disable X-Mizu-* headers (keeps Received header, removes X-Mizu-Trace-ID, X-Mizu-Authentication-Results, X-Mizu-Junk)
 #
+# [server.limits]
+# max_connections = 1000                                # Max total connections for this server
+# max_connections_per_ip = 10                           # Max connections per IP
+# max_connection_duration_seconds = 300                 # Max connection duration in seconds before force-release (default: 300 = 5m, 0 = disabled)
+#
 # # Email Authentication & Validation
 # spf_check = true                                      # Enable SPF (Sender Policy Framework) validation (default: false)
 # dmarc_check = true                                    # Enable DMARC validation (default: false) - requires SPF check enabled

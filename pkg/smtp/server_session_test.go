@@ -293,7 +293,7 @@ func TestSession_Logout(t *testing.T) {
 
 // TestConnectionTracker_Basic tests basic connection tracking
 func TestConnectionTracker_Basic(t *testing.T) {
-	tracker := NewConnectionTracker(10, 2)
+	tracker := NewConnectionTracker(10, 2, 0, nil)
 
 	// Test acquiring connection
 	err := tracker.TryAcquire("192.168.1.1:12345")
@@ -315,7 +315,7 @@ func TestConnectionTracker_Basic(t *testing.T) {
 
 // TestConnectionTracker_Limits tests connection limits
 func TestConnectionTracker_Limits(t *testing.T) {
-	tracker := NewConnectionTracker(3, 2)
+	tracker := NewConnectionTracker(3, 2, 0, nil)
 
 	// Acquire up to per-IP limit
 	if err := tracker.TryAcquire("192.168.1.1:1"); err != nil {
@@ -368,7 +368,7 @@ func TestTLSVersionString_Session(t *testing.T) {
 
 // TestConnectionTracker_Stats tests statistics
 func TestConnectionTracker_Stats(t *testing.T) {
-	tracker := NewConnectionTracker(10, 5)
+	tracker := NewConnectionTracker(10, 5, 0, nil)
 
 	// Acquire some connections
 	tracker.TryAcquire("192.168.1.1:1")

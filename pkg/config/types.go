@@ -90,9 +90,10 @@ type ServerConfig struct {
 
 // ServerLimitsConfig holds connection limits
 type ServerLimitsConfig struct {
-	MaxConnections        int `toml:"max_connections"`          // Total connections for this server
-	MaxConnectionsPerIP   int `toml:"max_connections_per_ip"`   // Per-IP connection limit (for DoS protection)
-	MaxConnectionsPerUser int `toml:"max_connections_per_user"` // Per-user connection limit (for submission servers)
+	MaxConnections               int `toml:"max_connections"`                 // Total connections for this server
+	MaxConnectionsPerIP          int `toml:"max_connections_per_ip"`          // Per-IP connection limit (for DoS protection)
+	MaxConnectionsPerUser        int `toml:"max_connections_per_user"`        // Per-user connection limit (for submission servers)
+	MaxConnectionDurationSeconds int `toml:"max_connection_duration_seconds"` // Maximum connection duration in seconds before force-release (default: 300 = 5m, 0 = disabled)
 }
 
 // ServerValidationConfig holds message validation settings (applies to both relay and submission)

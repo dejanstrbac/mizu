@@ -9,7 +9,7 @@ import (
 
 // TestE2E_PerIPConnectionLimit demonstrates per-IP connection limiting works end-to-end
 func TestE2E_PerIPConnectionLimit(t *testing.T) {
-	tracker := NewConnectionTracker(100, 3) // Max 3 per IP
+	tracker := NewConnectionTracker(100, 3, 0, nil) // Max 3 per IP
 
 	// Simulate 5 connection attempts from the same IP
 	ip := "192.168.1.100:5000"
@@ -72,7 +72,7 @@ func TestE2E_PerIPConnectionLimit(t *testing.T) {
 
 // TestE2E_GlobalConnectionLimit demonstrates global connection limiting works end-to-end
 func TestE2E_GlobalConnectionLimit(t *testing.T) {
-	tracker := NewConnectionTracker(5, 10) // Max 5 total, 10 per IP
+	tracker := NewConnectionTracker(5, 10, 0, nil) // Max 5 total, 10 per IP
 
 	var successful int
 	var rejected int
@@ -110,7 +110,7 @@ func TestE2E_GlobalConnectionLimit(t *testing.T) {
 
 // TestE2E_ConcurrentConnectionsFromSameIP simulates realistic concurrent connection scenario
 func TestE2E_ConcurrentConnectionsFromSameIP(t *testing.T) {
-	tracker := NewConnectionTracker(50, 5) // Max 5 per IP
+	tracker := NewConnectionTracker(50, 5, 0, nil) // Max 5 per IP
 
 	var wg sync.WaitGroup
 	var successMu sync.Mutex
@@ -159,7 +159,7 @@ func TestE2E_ConcurrentConnectionsFromSameIP(t *testing.T) {
 // TestE2E_MixedIPScenario simulates a realistic mixed scenario
 func TestE2E_MixedIPScenario(t *testing.T) {
 	// Realistic limits: max 100 total, max 10 per IP
-	tracker := NewConnectionTracker(100, 10)
+	tracker := NewConnectionTracker(100, 10, 0, nil)
 
 	type connection struct {
 		ip string
@@ -269,7 +269,7 @@ func TestE2E_HealthCheckUtilization(t *testing.T) {
 
 	for _, scenario := range scenarios {
 		// Create fresh tracker for each scenario
-		tracker := NewConnectionTracker(10, 5)
+		tracker := NewConnectionTracker(10, 5, 0, nil)
 
 		// Add connections
 		for i := 0; i < scenario.connections; i++ {
@@ -292,7 +292,7 @@ func TestE2E_HealthCheckUtilization(t *testing.T) {
 
 // TestE2E_RapidConnectDisconnect simulates rapid connection churn
 func TestE2E_RapidConnectDisconnect(t *testing.T) {
-	tracker := NewConnectionTracker(20, 5)
+	tracker := NewConnectionTracker(20, 5, 0, nil)
 
 	var wg sync.WaitGroup
 	iterations := 100

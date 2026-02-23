@@ -750,8 +750,14 @@ func createServerBackend(
 		"server_type", serverCfg.Type,
 	)
 
-	// Create per-server connection tracker
-	connTracker := smtp.NewConnectionTracker(serverCfg.Limits.MaxConnections, serverCfg.Limits.MaxConnectionsPerIP)
+	// Create per-server connection tracker with max connection duration for leak protection.
+	// Default to 300s (5 minutes) if not configured (0).
+	maxConnDuration := time.Duration(serverCfg.Limits.MaxConnectionDurationSeconds) * time.Second
+	if serverCfg.Limits.MaxConnectionDurationSeconds == 0 {
+		maxConnDuration = 5 * time.Minute // Default: 5 minutes
+	}
+	connTracker := smtp.NewConnectionTracker(serverCfg.Limits.MaxConnections, serverCfg.Limits.MaxConnectionsPerIP, maxConnDuration, serverLogger)
+	connTracker.Start()
 
 	// Register connection tracker with stats manager for active connection monitoring
 	if statsRecorder != nil {
@@ -1206,12 +1212,18 @@ func runSMTPServerInstance(ctx context.Context, serverCfg *config.ServerConfig, 
 			logger.Warn("Server shutdown timeout", "server", serverCfg.Name)
 		}
 
-		// Shutdown rate limiters and cleanup background goroutines
+		// Shutdown rate limiters, connection tracker reaper, and cleanup background goroutines
 		if be.AuthRateLimiter != nil {
 			be.AuthRateLimiter.Shutdown()
 		}
 		if be.RateLimiter != nil {
 			be.RateLimiter.Shutdown()
+		}
+		if be.DistTracker != nil {
+			be.DistTracker.Stop()
+		}
+		if be.ConnTracker != nil {
+			be.ConnTracker.Stop()
 		}
 
 	case err := <-serverErrors:

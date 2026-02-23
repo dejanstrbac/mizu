@@ -62,7 +62,7 @@ func TestDistributedTracker_LocalAndGlobalLimits(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// Local tracker: max 5 per IP, max 10 total
-	local := NewConnectionTracker(10, 5)
+	local := NewConnectionTracker(10, 5, 0, nil)
 
 	// Distributed tracker: global max 8 per IP across cluster
 	mockCluster := newMockCluster()
@@ -122,7 +122,7 @@ func TestDistributedTracker_LocalAndGlobalLimits(t *testing.T) {
 func TestDistributedTracker_StalePeersIgnored(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
@@ -170,7 +170,7 @@ func TestDistributedTracker_StalePeersIgnored(t *testing.T) {
 func TestDistributedTracker_GossipHandler(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
@@ -225,7 +225,7 @@ func TestDistributedTracker_GossipHandler(t *testing.T) {
 func TestDistributedTracker_GetGlobalStats(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
@@ -297,7 +297,7 @@ func TestDistributedTracker_GetGlobalStats(t *testing.T) {
 func TestDistributedTracker_ConcurrentAccess(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(1000, 50)
+	local := NewConnectionTracker(1000, 50, 0, nil)
 	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
@@ -375,7 +375,7 @@ func TestDistributedTracker_ConcurrentAccess(t *testing.T) {
 func TestDistributedTracker_ReleaseRollback(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
@@ -432,7 +432,7 @@ func TestDistributedTracker_ReleaseRollback(t *testing.T) {
 func TestDistributedTracker_HealthCheck(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
@@ -486,7 +486,7 @@ func TestDistributedTracker_HealthCheck(t *testing.T) {
 func TestDistributedTracker_NoGlobalLimit(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	local := NewConnectionTracker(100, 5)
+	local := NewConnectionTracker(100, 5, 0, nil)
 	mockCluster := newMockCluster()
 	dt := NewDistributedTracker(
 		local,
@@ -536,7 +536,7 @@ func TestDistributedTracker_ProactivePeerCleanup(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockCluster := newMockCluster()
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 
 	dt := NewDistributedTracker(
 		local,
@@ -594,7 +594,7 @@ func TestDistributedTracker_EventNotifications(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	mockCluster := newMockCluster()
 
-	local := NewConnectionTracker(100, 10)
+	local := NewConnectionTracker(100, 10, 0, nil)
 
 	dt := NewDistributedTracker(
 		local,

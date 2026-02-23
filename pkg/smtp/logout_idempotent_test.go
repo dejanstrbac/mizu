@@ -19,7 +19,7 @@ import (
 // (leaking negative counts) and call sessionsWg.Done() twice (WaitGroup panic).
 func TestLogout_Idempotent(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tracker := NewConnectionTracker(100, 10)
+	tracker := NewConnectionTracker(100, 10, 0, nil)
 	var wg sync.WaitGroup
 	var sessionCount atomic.Int64
 
@@ -94,7 +94,7 @@ func TestLogout_Idempotent(t *testing.T) {
 // TestLogout_Idempotent_WithDistributedTracker verifies idempotency with the distributed tracker path.
 func TestLogout_Idempotent_WithDistributedTracker(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	localTracker := NewConnectionTracker(100, 10)
+	localTracker := NewConnectionTracker(100, 10, 0, nil)
 	distTracker := NewDistributedTracker(localTracker, nil, "", "", DistributedConfig{
 		Hostname:       "test-node",
 		GossipInterval: 5 * time.Second,
@@ -165,7 +165,7 @@ func TestLogout_Idempotent_WithDistributedTracker(t *testing.T) {
 // the new session. The old session's Logout must not run twice.
 func TestLogout_SimulateReEHLO(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tracker := NewConnectionTracker(100, 10)
+	tracker := NewConnectionTracker(100, 10, 0, nil)
 	var wg sync.WaitGroup
 	var sessionCount atomic.Int64
 
@@ -274,7 +274,7 @@ func TestLogout_SimulateReEHLO(t *testing.T) {
 // TestLogout_ConcurrentCalls verifies that concurrent Logout calls are safe.
 func TestLogout_ConcurrentCalls(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	tracker := NewConnectionTracker(100, 10)
+	tracker := NewConnectionTracker(100, 10, 0, nil)
 	var wg sync.WaitGroup
 	var sessionCount atomic.Int64
 

@@ -373,14 +373,34 @@ func (dt *DistributedTracker) Stop() {
 
 // TryAcquire attempts to acquire a connection slot with cluster-wide limit checking
 func (dt *DistributedTracker) TryAcquire(remoteAddr string) error {
+	host, _, _ := parseAddr(remoteAddr)
+
 	// Step 1: Check local limit (fast path)
 	if err := dt.local.TryAcquire(remoteAddr); err != nil {
 		return err
 	}
 
 	// Step 2: Check estimated global limit (if configured)
+	// We get the local count using the optimized method to avoid lock contention
 	if dt.globalMaxPerIP > 0 {
-		globalCount := dt.estimateGlobalCount(remoteAddr)
+		localCount := dt.local.GetCountForIP(host)
+
+		// Add peer counts
+		dt.peerMu.RLock()
+		peerTotal := 0
+		for _, peerState := range dt.peerConnections {
+			// Ignore stale peer data (older than 30 seconds)
+			if time.Since(peerState.UpdatedAt) > 30*time.Second {
+				continue
+			}
+			if peerState.Connections != nil {
+				peerTotal += peerState.Connections[host]
+			}
+		}
+		dt.peerMu.RUnlock()
+
+		globalCount := localCount + peerTotal
+
 		if globalCount > dt.globalMaxPerIP {
 			// Rollback local acquisition
 			dt.local.Release(remoteAddr)
@@ -401,30 +421,16 @@ func (dt *DistributedTracker) GetStats() (total int, uniqueIPs int, perIP map[st
 	return dt.local.GetStats()
 }
 
-// estimateGlobalCount calculates the estimated global connection count for an IP
-func (dt *DistributedTracker) estimateGlobalCount(remoteAddr string) int {
-	host, _, _ := parseAddr(remoteAddr)
+// GetTotalCount returns the current total connection count (lock-free).
+// This delegates to the local tracker and is safe to call from hot paths.
+func (dt *DistributedTracker) GetTotalCount() int {
+	return dt.local.GetTotalCount()
+}
 
-	// Get local count
-	_, _, perIP := dt.local.GetStats()
-	localCount := perIP[host]
-
-	// Add peer counts
-	dt.peerMu.RLock()
-	defer dt.peerMu.RUnlock()
-
-	peerTotal := 0
-	for _, peerState := range dt.peerConnections {
-		// Ignore stale peer data (older than 30 seconds)
-		if time.Since(peerState.UpdatedAt) > 30*time.Second {
-			continue
-		}
-		if peerState.Connections != nil {
-			peerTotal += peerState.Connections[host]
-		}
-	}
-
-	return localCount + peerTotal
+// GetCountForIP returns the current connection count for a specific IP.
+// This delegates to the local tracker for efficiency.
+func (dt *DistributedTracker) GetCountForIP(ip string) int {
+	return dt.local.GetCountForIP(ip)
 }
 
 // gossipLoopInner is the inner function for gossip loop

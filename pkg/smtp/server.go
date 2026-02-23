@@ -159,7 +159,18 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	// again without calling Logout on the previous session first. Release the old session's
 	// connection slot now to prevent the counter from leaking.
 	if prev := c.Session(); prev != nil {
-		prev.Logout()
+		// We must cast to *Session to access our custom Logout method if needed,
+		// but since Session interface has Logout, we can just call it.
+		// However, we need to be careful about what Logout does.
+		// Our Logout releases the connection slot.
+		if err := prev.Logout(); err != nil {
+			be.Logger.Error("Failed to logout previous session", "error", err)
+		}
+		// Explicitly set the session to nil on the connection to prevent double-logout
+		// or other issues if go-smtp tries to use it later (though it shouldn't).
+		// Note: go-smtp doesn't expose a SetSession method on Conn interface,
+		// but we are in NewSession which is called by go-smtp, and it will overwrite
+		// the session on the connection after this function returns successfully.
 	}
 
 	// Extract IP without port for all subsequent operations
@@ -299,23 +310,22 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	}
 
 	// Log client connection immediately with detailed info
-	// Get current connection count for monitoring
-	var activeConns int
+	// Note: We use lock-free atomic operations to avoid RWMutex contention under high load.
+	// GetTotalCount() is lock-free (atomic read), GetCountForIP() uses RLock for single IP only.
+	var activeConnections int
 	var connectionsFromIP int
 	if be.DistTracker != nil {
-		total, _, perIP := be.DistTracker.GetStats()
-		activeConns = total
-		connectionsFromIP = perIP[remoteAddr]
+		activeConnections = be.DistTracker.GetTotalCount()
+		connectionsFromIP = be.DistTracker.GetCountForIP(remoteAddr)
 	} else if tracker != nil {
-		total, _, perIP := tracker.GetStats()
-		activeConns = total
-		connectionsFromIP = perIP[remoteAddr]
+		activeConnections = tracker.GetTotalCount()
+		connectionsFromIP = tracker.GetCountForIP(remoteAddr)
 	}
 
 	be.Logger.Info("Client connected",
 		"server", be.ServerConfig.Name,
 		"remote_addr", remoteAddr,
-		"active_connections", activeConns,
+		"active_connections", activeConnections,
 		"connections_from_ip", connectionsFromIP,
 		"tls_enabled", be.ServerConfig.IsTLSEnabled(),
 		"tls_mode", be.ServerConfig.TLS.Mode,
@@ -521,8 +531,6 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		recipientValidator: be.RecipientValidator, // Recipient validator (nil if disabled)
 	}
 
-	sessionCreated = true
-
 	be.Logger.Info("Session created successfully",
 		"server", be.ServerConfig.Name,
 		"remote_addr", remoteAddr,
@@ -530,6 +538,7 @@ func (be *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 		"trace_id", traceID,
 		"initial_tls_state", tlsState != nil)
 
+	sessionCreated = true
 	return session, nil
 }
 

@@ -12,7 +12,7 @@ require (
 	github.com/emersion/go-message v0.18.2
 	github.com/emersion/go-msgauth v0.7.0
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
-	github.com/emersion/go-smtp v0.22.0
+	github.com/emersion/go-smtp v0.21.3
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/hashicorp/memberlist v0.5.3
 	github.com/migadu/spf v1.0.0
@@ -21,6 +21,8 @@ require (
 	golang.org/x/crypto v0.48.0
 	golang.org/x/net v0.50.0
 )
+
+replace github.com/emersion/go-smtp => github.com/dejanstrbac/go-smtp v0.0.0-20260223173016-822ae132f99a
 
 require (
 	github.com/armon/go-metrics v0.4.1 // indirect

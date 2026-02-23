@@ -2,12 +2,15 @@ package smtp
 
 import (
 	"fmt"
+	"log/slog"
+	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestConnectionTracker_GlobalLimit(t *testing.T) {
-	tracker := NewConnectionTracker(3, 0) // Max 3 total, unlimited per IP
+	tracker := NewConnectionTracker(3, 0, 0, nil) // Max 3 total, unlimited per IP
 
 	// Acquire 3 connections from different IPs
 	if err := tracker.TryAcquire("192.168.1.1:1234"); err != nil {
@@ -44,7 +47,7 @@ func TestConnectionTracker_GlobalLimit(t *testing.T) {
 }
 
 func TestConnectionTracker_PerIPLimit(t *testing.T) {
-	tracker := NewConnectionTracker(0, 2) // Unlimited total, max 2 per IP
+	tracker := NewConnectionTracker(0, 2, 0, nil) // Unlimited total, max 2 per IP
 
 	// Acquire 2 connections from same IP
 	if err := tracker.TryAcquire("192.168.1.1:1234"); err != nil {
@@ -86,7 +89,7 @@ func TestConnectionTracker_PerIPLimit(t *testing.T) {
 }
 
 func TestConnectionTracker_BothLimits(t *testing.T) {
-	tracker := NewConnectionTracker(5, 2) // Max 5 total, max 2 per IP
+	tracker := NewConnectionTracker(5, 2, 0, nil) // Max 5 total, max 2 per IP
 
 	// Acquire 2 connections from IP1
 	tracker.TryAcquire("192.168.1.1:1234")
@@ -111,7 +114,7 @@ func TestConnectionTracker_BothLimits(t *testing.T) {
 }
 
 func TestConnectionTracker_UnlimitedMode(t *testing.T) {
-	tracker := NewConnectionTracker(0, 0) // Unlimited
+	tracker := NewConnectionTracker(0, 0, 0, nil) // Unlimited
 
 	// Should accept many connections
 	for i := 0; i < 1000; i++ {
@@ -128,7 +131,7 @@ func TestConnectionTracker_UnlimitedMode(t *testing.T) {
 }
 
 func TestConnectionTracker_IPv6(t *testing.T) {
-	tracker := NewConnectionTracker(0, 2) // Max 2 per IP
+	tracker := NewConnectionTracker(0, 2, 0, nil) // Max 2 per IP
 
 	// Test with IPv6 addresses
 	if err := tracker.TryAcquire("[2001:db8::1]:1234"); err != nil {
@@ -145,7 +148,7 @@ func TestConnectionTracker_IPv6(t *testing.T) {
 }
 
 func TestConnectionTracker_ConcurrentAccess(t *testing.T) {
-	tracker := NewConnectionTracker(100, 10)
+	tracker := NewConnectionTracker(100, 10, 0, nil)
 	var wg sync.WaitGroup
 
 	// Simulate concurrent connections and releases
@@ -176,7 +179,7 @@ func TestConnectionTracker_ConcurrentAccess(t *testing.T) {
 }
 
 func TestConnectionTracker_ReleaseNonExistent(t *testing.T) {
-	tracker := NewConnectionTracker(10, 5)
+	tracker := NewConnectionTracker(10, 5, 0, nil)
 
 	// Release without acquire should not panic or cause issues
 	tracker.Release("192.168.1.1:1234")
@@ -191,7 +194,7 @@ func TestConnectionTracker_ReleaseNonExistent(t *testing.T) {
 }
 
 func TestConnectionTracker_GetLimits(t *testing.T) {
-	tracker := NewConnectionTracker(50, 5)
+	tracker := NewConnectionTracker(50, 5, 0, nil)
 
 	maxTotal, maxPerIP := tracker.GetLimits()
 	if maxTotal != 50 {
@@ -203,7 +206,7 @@ func TestConnectionTracker_GetLimits(t *testing.T) {
 }
 
 func TestConnectionTracker_MemoryLeak(t *testing.T) {
-	tracker := NewConnectionTracker(1000, 10)
+	tracker := NewConnectionTracker(1000, 10, 0, nil)
 
 	// Acquire and release many connections
 	for i := 0; i < 100; i++ {
@@ -216,5 +219,196 @@ func TestConnectionTracker_MemoryLeak(t *testing.T) {
 	_, uniqueIPs, _ := tracker.GetStats()
 	if uniqueIPs != 0 {
 		t.Errorf("Memory leak detected: expected 0 IPs in map, got %d", uniqueIPs)
+	}
+}
+
+// TestConnectionTracker_ReaperForceRelease verifies that the reaper
+// automatically force-releases connections that exceed MaxConnectionDuration.
+// This prevents connection leaks from panics, half-open TCP connections,
+// or go-smtp edge cases (like re-EHLO without Logout).
+func TestConnectionTracker_ReaperForceRelease(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	}))
+
+	// Create tracker with 2-second max duration
+	maxDuration := 2 * time.Second
+	tracker := NewConnectionTracker(100, 10, maxDuration, logger)
+	tracker.Start()
+	defer tracker.Stop()
+
+	// Acquire connections from 3 different IPs
+	ips := []string{
+		"192.168.1.1:1234",
+		"192.168.1.2:5678",
+		"192.168.1.3:9999",
+	}
+
+	for _, ip := range ips {
+		if err := tracker.TryAcquire(ip); err != nil {
+			t.Fatalf("Failed to acquire connection for %s: %v", ip, err)
+		}
+	}
+
+	// Verify connections are tracked
+	total, uniqueIPs, perIP := tracker.GetStats()
+	if total != 3 {
+		t.Errorf("Expected 3 total connections, got %d", total)
+	}
+	if uniqueIPs != 3 {
+		t.Errorf("Expected 3 unique IPs, got %d", uniqueIPs)
+	}
+	for _, ip := range ips {
+		host := ip[:len(ip)-5] // Strip port
+		if perIP[host] != 1 {
+			t.Errorf("Expected 1 connection from %s, got %d", host, perIP[host])
+		}
+	}
+
+	// Wait for reaper to run (maxDuration + grace period)
+	// Reaper interval is maxDuration/2 = 1s, so it should run within 3s
+	time.Sleep(3 * time.Second)
+
+	// Verify all connections were force-released
+	total, uniqueIPs, perIP = tracker.GetStats()
+	if total != 0 {
+		t.Errorf("Expected 0 connections after reaper, got %d (perIP: %v)", total, perIP)
+	}
+	if uniqueIPs != 0 {
+		t.Errorf("Expected 0 unique IPs after reaper, got %d", uniqueIPs)
+	}
+
+	// Verify reaper stats
+	health := tracker.CheckHealth()
+	details, ok := health.Details.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected Details to be map[string]interface{}, got %T", health.Details)
+	}
+	if reaped, ok := details["total_reaped"].(uint64); !ok || reaped != 3 {
+		t.Errorf("Expected 3 reaped connections in health stats, got %v", details["total_reaped"])
+	}
+}
+
+// TestConnectionTracker_ReaperPartialRelease verifies that the reaper
+// only releases expired connections, not all connections.
+func TestConnectionTracker_ReaperPartialRelease(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelWarn, // Reduce noise
+	}))
+
+	maxDuration := 3 * time.Second
+	tracker := NewConnectionTracker(100, 10, maxDuration, logger)
+	tracker.Start()
+	defer tracker.Stop()
+
+	// Acquire 2 connections initially
+	tracker.TryAcquire("192.168.1.1:1111")
+	tracker.TryAcquire("192.168.1.2:2222")
+
+	// Wait 2 seconds
+	time.Sleep(2 * time.Second)
+
+	// Acquire 2 more connections (these are newer)
+	tracker.TryAcquire("192.168.1.3:3333")
+	tracker.TryAcquire("192.168.1.4:4444")
+
+	// Verify 4 total connections
+	total, _, _ := tracker.GetStats()
+	if total != 4 {
+		t.Errorf("Expected 4 connections before reaper, got %d", total)
+	}
+
+	// Wait for reaper to run (first 2 connections should be expired by now)
+	// maxDuration=3s, we waited 2s, so first 2 are at 2s age, need to wait 1.5s more
+	time.Sleep(2 * time.Second)
+
+	// Only the first 2 connections should be reaped (they're >3s old)
+	total, uniqueIPs, _ := tracker.GetStats()
+	if total != 2 {
+		t.Errorf("Expected 2 connections remaining after partial reap, got %d", total)
+	}
+	if uniqueIPs != 2 {
+		t.Errorf("Expected 2 unique IPs remaining, got %d", uniqueIPs)
+	}
+
+	// Verify reaper stats show 2 reaped
+	health := tracker.CheckHealth()
+	details, ok := health.Details.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected Details to be map[string]interface{}, got %T", health.Details)
+	}
+	if reaped, ok := details["total_reaped"].(uint64); !ok || reaped != 2 {
+		t.Errorf("Expected 2 reaped connections, got %v", details["total_reaped"])
+	}
+}
+
+// TestConnectionTracker_ReaperWithManualRelease verifies that manually
+// released connections are not double-counted by the reaper.
+func TestConnectionTracker_ReaperWithManualRelease(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelWarn,
+	}))
+
+	maxDuration := 2 * time.Second
+	tracker := NewConnectionTracker(100, 10, maxDuration, logger)
+	tracker.Start()
+	defer tracker.Stop()
+
+	// Acquire 3 connections
+	tracker.TryAcquire("192.168.1.1:1111")
+	tracker.TryAcquire("192.168.1.2:2222")
+	tracker.TryAcquire("192.168.1.3:3333")
+
+	// Manually release one connection
+	tracker.Release("192.168.1.2:2222")
+
+	// Wait for reaper to run
+	time.Sleep(3 * time.Second)
+
+	// All connections should be gone (1 manual + 2 reaped)
+	total, _, _ := tracker.GetStats()
+	if total != 0 {
+		t.Errorf("Expected 0 connections after manual release + reaper, got %d", total)
+	}
+
+	// Verify only 2 were reaped (not 3, since one was manually released)
+	health := tracker.CheckHealth()
+	details, ok := health.Details.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected Details to be map[string]interface{}, got %T", health.Details)
+	}
+	if reaped, ok := details["total_reaped"].(uint64); !ok || reaped != 2 {
+		t.Errorf("Expected 2 reaped connections (not counting manual release), got %v", details["total_reaped"])
+	}
+}
+
+// TestConnectionTracker_ReaperDisabled verifies that no reaping occurs
+// when MaxConnectionDuration is 0 (disabled).
+func TestConnectionTracker_ReaperDisabled(t *testing.T) {
+	tracker := NewConnectionTracker(100, 10, 0, nil) // Reaper disabled
+	tracker.Start()                                  // Should be no-op
+	defer tracker.Stop()                             // Should be no-op
+
+	// Acquire connections
+	tracker.TryAcquire("192.168.1.1:1111")
+	tracker.TryAcquire("192.168.1.2:2222")
+
+	// Wait (reaper should not run)
+	time.Sleep(1 * time.Second)
+
+	// Connections should still be tracked (not reaped)
+	total, _, _ := tracker.GetStats()
+	if total != 2 {
+		t.Errorf("Expected 2 connections (reaper disabled), got %d", total)
+	}
+
+	// Verify no reaping occurred
+	health := tracker.CheckHealth()
+	details, ok := health.Details.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected Details to be map[string]interface{}, got %T", health.Details)
+	}
+	if reaped, ok := details["total_reaped"].(uint64); !ok || reaped != 0 {
+		t.Errorf("Expected 0 reaped connections when disabled, got %v", details["total_reaped"])
 	}
 }
