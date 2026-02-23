@@ -399,13 +399,14 @@ type ServerDomainStats struct {
 
 // ServerSummary provides per-server message statistics
 type ServerSummary struct {
-	Hostname         string                        `json:"hostname"`
-	TotalMessages    int64                         `json:"total_messages"`
-	AcceptedMessages int64                         `json:"accepted_messages"`
-	RejectedMessages int64                         `json:"rejected_messages"`
-	JunkMessages     int64                         `json:"junk_messages"`
-	LastUpdated      time.Time                     `json:"last_updated"`
-	Domains          map[string]*ServerDomainStats `json:"domains,omitempty"`
+	Hostname          string                        `json:"hostname"`
+	TotalMessages     int64                         `json:"total_messages"`
+	AcceptedMessages  int64                         `json:"accepted_messages"`
+	RejectedMessages  int64                         `json:"rejected_messages"`
+	JunkMessages      int64                         `json:"junk_messages"`
+	ActiveConnections int64                         `json:"active_connections"` // Active SMTP connections for this server
+	LastUpdated       time.Time                     `json:"last_updated"`
+	Domains           map[string]*ServerDomainStats `json:"domains,omitempty"`
 }
 
 // StatsSnapshot is a complete snapshot of stats for API responses

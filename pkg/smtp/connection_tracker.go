@@ -31,6 +31,7 @@ type connectionShard struct {
 // and force-releases them. This prevents connection count leaks.
 type ConnectionTracker struct {
 	name                  string        // Health checker name (empty = default "connection_tracker")
+	serverName            string        // Config server name (e.g., "mx-primary", "mx-submission")
 	maxConnections        int           // Maximum total concurrent connections (0 = unlimited)
 	maxConnectionsPerIP   int           // Maximum concurrent connections per IP (0 = unlimited)
 	maxConnectionDuration time.Duration // Maximum duration before a connection is force-released (0 = disabled)
@@ -41,6 +42,9 @@ type ConnectionTracker struct {
 
 	// Reaper stats (how many connections were force-released)
 	totalReaped atomic.Uint64
+
+	// Generation counter for change detection (to optimize gossip)
+	generation atomic.Uint64
 
 	// Lifecycle
 	logger *slog.Logger
@@ -181,6 +185,7 @@ func (ct *ConnectionTracker) reapExpired() int {
 				// Decrement counters
 				shard.ipConnections[ip] -= expired
 				ct.totalConnections.Add(-int32(expired))
+				ct.generation.Add(1)
 				reaped += expired
 
 				// Prevent negative counts (defensive)
@@ -245,6 +250,7 @@ func (ct *ConnectionTracker) TryAcquire(remoteAddr string) error {
 
 	// Acquire connection slot
 	ct.totalConnections.Add(1)
+	ct.generation.Add(1)
 	shard.ipConnections[host]++
 	shard.connTimes[host] = append(shard.connTimes[host], time.Now())
 
@@ -268,6 +274,7 @@ func (ct *ConnectionTracker) Release(remoteAddr string) {
 	if ct.totalConnections.Load() > 0 {
 		ct.totalConnections.Add(-1)
 	}
+	ct.generation.Add(1)
 
 	if count, exists := shard.ipConnections[host]; exists && count > 0 {
 		shard.ipConnections[host]--
@@ -332,6 +339,12 @@ func (ct *ConnectionTracker) GetLimits() (maxTotal, maxPerIP int) {
 	return ct.maxConnections, ct.maxConnectionsPerIP
 }
 
+// GetGeneration returns the current generation counter.
+// This changes whenever a connection is added or removed.
+func (ct *ConnectionTracker) GetGeneration() uint64 {
+	return ct.generation.Load()
+}
+
 // SetName sets a custom health checker name (e.g. "connection_tracker:mx-primary").
 func (ct *ConnectionTracker) SetName(name string) {
 	ct.name = name
@@ -343,6 +356,18 @@ func (ct *ConnectionTracker) Name() string {
 		return ct.name
 	}
 	return "connection_tracker"
+}
+
+// SetServerName sets the config server name for this connection tracker.
+// This is used for per-server statistics tracking. Safe to call after creation.
+func (ct *ConnectionTracker) SetServerName(serverName string) {
+	ct.serverName = serverName
+}
+
+// GetServerName returns the config server name (implements stats.ConnectionTracker interface).
+// This is lock-free and safe for concurrent use.
+func (ct *ConnectionTracker) GetServerName() string {
+	return ct.serverName
 }
 
 // CheckHealth returns the health status of the connection tracker.

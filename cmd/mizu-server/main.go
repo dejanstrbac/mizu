@@ -757,6 +757,7 @@ func createServerBackend(
 		maxConnDuration = 5 * time.Minute // Default: 5 minutes
 	}
 	connTracker := smtp.NewConnectionTracker(serverCfg.Limits.MaxConnections, serverCfg.Limits.MaxConnectionsPerIP, maxConnDuration, serverLogger)
+	connTracker.SetServerName(serverCfg.Name)
 	connTracker.Start()
 
 	// Register connection tracker with stats manager for active connection monitoring
@@ -796,6 +797,7 @@ func createServerBackend(
 			},
 			serverLogger,
 		)
+		distTracker.SetServerName(serverCfg.Name)
 		distTracker.Start()
 		serverLogger.Info("Distributed tracking enabled", "global_max_per_ip", serverCfg.Distributed.GlobalMaxPerIP)
 	}

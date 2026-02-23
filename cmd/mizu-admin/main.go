@@ -255,13 +255,14 @@ type ServerDomainStats struct {
 }
 
 type ServerSummary struct {
-	Hostname         string                        `json:"hostname"`
-	TotalMessages    int64                         `json:"total_messages"`
-	AcceptedMessages int64                         `json:"accepted_messages"`
-	RejectedMessages int64                         `json:"rejected_messages"`
-	JunkMessages     int64                         `json:"junk_messages"`
-	LastUpdated      time.Time                     `json:"last_updated"`
-	Domains          map[string]*ServerDomainStats `json:"domains,omitempty"`
+	Hostname          string                        `json:"hostname"`
+	TotalMessages     int64                         `json:"total_messages"`
+	AcceptedMessages  int64                         `json:"accepted_messages"`
+	RejectedMessages  int64                         `json:"rejected_messages"`
+	JunkMessages      int64                         `json:"junk_messages"`
+	ActiveConnections int64                         `json:"active_connections"` // Active SMTP connections for this server
+	LastUpdated       time.Time                     `json:"last_updated"`
+	Domains           map[string]*ServerDomainStats `json:"domains,omitempty"`
 }
 
 func cmdBlockedIPs() {
@@ -373,6 +374,8 @@ func cmdStats() {
 				fmt.Printf("    Incomplete:             %d  %6.1f%%\n", incomplete, incompleteRate)
 			}
 
+			fmt.Printf("  Active connections:       %d\n", srv.ActiveConnections)
+
 			if !srv.LastUpdated.IsZero() {
 				fmt.Printf("  Last updated:             %s\n", srv.LastUpdated.Format("2006-01-02 15:04:05"))
 			}
@@ -424,7 +427,6 @@ func cmdStats() {
 	fmt.Printf("Total IPs tracked:        %d\n", stats.Summary.TotalIPs)
 	fmt.Printf("Total domains tracked:    %d\n", stats.Summary.TotalDomains)
 	fmt.Printf("Blocked IPs:              %d\n", stats.Summary.BlockedIPs)
-	fmt.Printf("Active connections (local): %d\n", stats.Summary.ActiveConnections)
 	fmt.Printf("Events processed:         %d\n", stats.Summary.EventsProcessed)
 	fmt.Printf("Events dropped:           %d\n", stats.Summary.EventsDropped)
 }

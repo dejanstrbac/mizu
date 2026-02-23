@@ -33,10 +33,11 @@ type ClusterManager interface {
 
 // DistributedTracker wraps ConnectionTracker with memberlist gossip and S3 sync capabilities
 type DistributedTracker struct {
-	local    *ConnectionTracker // Local connection tracking (fast path)
-	name     string             // Health checker name (empty = default)
-	hostname string             // This server's hostname
-	logger   *slog.Logger
+	local      *ConnectionTracker // Local connection tracking (fast path)
+	name       string             // Health checker name (empty = default)
+	serverName string             // Config server name (e.g., "mx-primary", "mx-submission")
+	hostname   string             // This server's hostname
+	logger     *slog.Logger
 
 	// Vector clock for conflict resolution
 	vectorClock *cluster.VectorClock
@@ -64,6 +65,11 @@ type DistributedTracker struct {
 	recipientBlocked  map[string]time.Time // email -> expiry (403 responses)
 	recipientMu       sync.RWMutex
 	recipientCacheTTL time.Duration // How long to cache recipient results
+
+	// Snapshot caching to avoid expensive GetStats() calls
+	snapshotMu         sync.Mutex
+	lastConnGeneration uint64
+	lastConnMap        map[string]int
 
 	// Control
 	ctx    context.Context
@@ -475,7 +481,27 @@ func (dt *DistributedTracker) broadcastToCluster() {
 
 // createSnapshot creates a snapshot of current connection state
 func (dt *DistributedTracker) createSnapshot() *ConnectionSnapshot {
-	total, _, perIP := dt.local.GetStats()
+	// Optimize: Check if connections changed since last snapshot
+	currentGen := dt.local.GetGeneration()
+
+	var perIP map[string]int
+	var total int
+
+	dt.snapshotMu.Lock()
+	if currentGen == dt.lastConnGeneration && dt.lastConnMap != nil {
+		// No changes, reuse cached map
+		perIP = dt.lastConnMap
+		total = dt.local.GetTotalCount()
+	} else {
+		dt.snapshotMu.Unlock()
+		// Release lock while calling GetStats to avoid holding it during expensive op
+		total, _, perIP = dt.local.GetStats()
+
+		dt.snapshotMu.Lock()
+		dt.lastConnGeneration = currentGen
+		dt.lastConnMap = perIP
+	}
+	dt.snapshotMu.Unlock()
 
 	// Copy recipient cache
 	dt.recipientMu.RLock()
@@ -870,6 +896,21 @@ func (dt *DistributedTracker) Name() string {
 		return dt.name
 	}
 	return "distributed_connections"
+}
+
+// SetServerName sets the config server name for this distributed tracker.
+// This is used for per-server statistics tracking. Safe to call after creation.
+func (dt *DistributedTracker) SetServerName(serverName string) {
+	dt.serverName = serverName
+	if dt.local != nil {
+		dt.local.SetServerName(serverName)
+	}
+}
+
+// GetServerName returns the config server name (implements stats.ConnectionTracker interface).
+// This is lock-free and safe for concurrent use.
+func (dt *DistributedTracker) GetServerName() string {
+	return dt.serverName
 }
 
 // CheckHealth reports the health status of the distributed connection tracker

@@ -107,7 +107,8 @@ type srvCounters struct {
 
 // ConnectionTracker interface for getting active connection stats
 type ConnectionTracker interface {
-	GetStats() (total int, uniqueIPs int, perIP map[string]int)
+	GetTotalCount() int    // Returns total active connections (lock-free optimization)
+	GetServerName() string // Returns the config server name (e.g., "mx-primary")
 }
 
 // event represents a statistical event to be processed
@@ -915,8 +916,7 @@ func (m *Manager) GetStatsSnapshot() *StatsSnapshot {
 	m.connTrackersMu.RLock()
 	var activeConnections int
 	for _, tracker := range m.connTrackers {
-		total, _, _ := tracker.GetStats()
-		activeConnections += total
+		activeConnections += tracker.GetTotalCount()
 	}
 	m.connTrackersMu.RUnlock()
 
@@ -946,16 +946,26 @@ func (m *Manager) GetStatsSnapshot() *StatsSnapshot {
 func (m *Manager) buildServerSummaries() map[string]*ServerSummary {
 	servers := make(map[string]*ServerSummary)
 
+	// Collect active connections per server from connection trackers
+	serverConnections := make(map[string]int)
+	m.connTrackersMu.RLock()
+	for _, tracker := range m.connTrackers {
+		serverName := tracker.GetServerName()
+		serverConnections[serverName] += tracker.GetTotalCount()
+	}
+	m.connTrackersMu.RUnlock()
+
 	// Add per-config-server summaries from local counters
 	m.srvCountersMu.RLock()
 	for name, c := range m.srvCounters {
 		summary := &ServerSummary{
-			Hostname:         name,
-			TotalMessages:    int64(c.total),
-			AcceptedMessages: int64(c.accepted),
-			RejectedMessages: int64(c.rejected),
-			JunkMessages:     int64(c.junk),
-			LastUpdated:      time.Now(),
+			Hostname:          name,
+			TotalMessages:     int64(c.total),
+			AcceptedMessages:  int64(c.accepted),
+			RejectedMessages:  int64(c.rejected),
+			JunkMessages:      int64(c.junk),
+			ActiveConnections: int64(serverConnections[name]),
+			LastUpdated:       time.Now(),
 		}
 		// Include per-server domain breakdown
 		if len(c.domains) > 0 {
