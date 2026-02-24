@@ -338,6 +338,19 @@ telnet localhost 25
 - Zero context switching required from the user
 - Go fix failing CI tests without being told how
 
+### 7. Git Command Usage
+- **ALWAYS** use `--no-pager` flag with git commands that may trigger a pager
+- This prevents commands from blocking while waiting for pager interaction
+- Examples:
+  - `git --no-pager diff`
+  - `git --no-pager log`
+  - `git --no-pager show`
+  - `git --no-pager status` (if verbose output expected)
+- Alternative: Set `GIT_PAGER=cat` environment variable for the command
+- **NEVER** commit alone - always ask user first before creating commits
+- **NEVER** use `git push --force` or `git push -f` - always ask user for permission first
+- Force push to main/master branches is especially dangerous and should always be explicitly confirmed
+
 ## Task Management
 
 1. **Plan First**: Write plan to tasks/todo.md with checkable items
