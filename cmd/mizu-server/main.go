@@ -548,6 +548,14 @@ func initTLS(cfg *config.Config, clusterMgr *cluster.Cluster, logger *slog.Logge
 
 		// Set default minimum TLS version (can be overridden per-server)
 		tlsConfig.MinVersion = tls.VersionTLS12
+
+		// Clear HTTP-specific ALPN protocols set by autocert.TLSConfig().
+		// autocert sets NextProtos to ["h2", "http/1.1", "acme-tls/1"] which are
+		// appropriate for HTTPS but incorrect for SMTP. Advertising HTTP ALPN on
+		// an SMTP connection can cause strict clients (e.g. Exchange Online) to
+		// abort the TLS handshake. The ACME TLS-ALPN-01 challenges are handled
+		// by the dedicated HTTPS server on port 443, not the SMTP servers.
+		tlsConfig.NextProtos = nil
 		logger.Info("Default TLS configuration ready (per-server min version can be set in [server.tls])")
 
 		return tlsConfig, s3Client, tlsMgr, nil

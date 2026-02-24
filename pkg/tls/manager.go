@@ -168,7 +168,24 @@ func NewManager(cfg Config, logger *slog.Logger) (*Manager, error) {
 				"error_type", fmt.Sprintf("%T", err))
 			return nil, fmt.Errorf("%w for %s: %v", ErrCertificateUnavailable, serverName, err)
 		}
-		logger.Info("TLS: Certificate provided successfully", "domain", serverName)
+
+		// Log certificate chain details for diagnostics
+		if cert != nil {
+			chainLen := len(cert.Certificate)
+			logger.Info("TLS: Certificate provided successfully",
+				"domain", serverName,
+				"chain_length", chainLen,
+				"has_leaf", chainLen > 0,
+				"has_intermediates", chainLen > 1)
+			if chainLen <= 1 {
+				logger.Warn("TLS: Certificate chain may be incomplete - no intermediate certificates",
+					"domain", serverName,
+					"chain_length", chainLen,
+					"hint", "Outlook/Exchange Online requires full chain (leaf + intermediate)")
+			}
+		} else {
+			logger.Info("TLS: Certificate provided successfully", "domain", serverName)
+		}
 		return cert, nil
 	}
 
