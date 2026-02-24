@@ -1320,11 +1320,17 @@ func containsBenignError(args []interface{}) bool {
 }
 
 func (l *smtpErrorLogger) Printf(format string, v ...interface{}) {
+	msg := fmt.Sprintf(format, v...)
 	if containsBenignError(v) {
-		l.logger.Debug("SMTP connection closed", "server", l.serverName, "message", fmt.Sprintf(format, v...))
+		l.logger.Debug("SMTP connection closed", "server", l.serverName, "message", msg)
 		return
 	}
-	l.logger.Error("SMTP error", "server", l.serverName, "message", fmt.Sprintf(format, v...))
+	// STARTTLS success/failure are informational, not errors
+	if strings.HasPrefix(msg, "STARTTLS ") {
+		l.logger.Info("SMTP TLS", "server", l.serverName, "message", msg)
+		return
+	}
+	l.logger.Error("SMTP error", "server", l.serverName, "message", msg)
 }
 
 func (l *smtpErrorLogger) Println(v ...interface{}) {
