@@ -281,17 +281,22 @@ func generateMessageID(domain string) string {
 
 // LoopDetectionResult contains the result of mail loop detection
 type LoopDetectionResult struct {
-	IsLoop       bool   // True if a loop was detected
-	HopCount     int    // Total number of Received headers (hops)
-	LoopHostname string // The hostname that appears multiple times (if IsLoop=true)
+	IsLoop        bool   // True if a loop was detected
+	HopCount      int    // Total number of Received headers (hops)
+	HostnameCount int    // Number of times our hostname appears in Received "by" clauses
+	LoopHostname  string // The hostname that appears multiple times (if IsLoop=true)
 }
 
 // detectMailLoop checks for mail loops by examining Received headers
 // A loop is detected if:
-// 1. The server's own hostname appears in any existing Received header, OR
+// 1. The server's own hostname appears 2+ times in existing Received "by" clauses, OR
 // 2. The number of Received headers (hops) exceeds maxHops
 //
-// This prevents infinite mail loops where a message bounces between servers.
+// A single occurrence of the hostname is expected in legitimate scenarios such as
+// mailing lists (e.g., Google Groups) or forwarding, where a message is first
+// processed by this server, forwarded externally, and then delivered back.
+// Only when the hostname appears two or more times is a real loop indicated.
+//
 // RFC 5321 section 6.3 recommends a hop count limit (typically 100, but we use 30 as default for safety)
 func detectMailLoop(rawEmail, serverHostname string, maxHops int) LoopDetectionResult {
 	result := LoopDetectionResult{}
@@ -302,8 +307,15 @@ func detectMailLoop(rawEmail, serverHostname string, maxHops int) LoopDetectionR
 	}
 
 	lines := strings.Split(rawEmail, "\r\n")
-	foundHostnameLoop := false
+	hostnameCount := 0
 	currentReceivedHeader := ""
+
+	// processHeader checks a complete Received header for our hostname in the "by" clause
+	processHeader := func(header string) {
+		if checkReceivedHeaderForLoop(header, serverHostname) {
+			hostnameCount++
+		}
+	}
 
 	// Parse all Received headers
 	// Format: "Received: from <client> by <server> ..."
@@ -312,11 +324,8 @@ func detectMailLoop(rawEmail, serverHostname string, maxHops int) LoopDetectionR
 		// Stop at end of headers (empty line)
 		if line == "" {
 			// Process the last accumulated Received header
-			if currentReceivedHeader != "" && !foundHostnameLoop {
-				if checkReceivedHeaderForLoop(currentReceivedHeader, serverHostname) {
-					foundHostnameLoop = true
-					result.LoopHostname = serverHostname
-				}
+			if currentReceivedHeader != "" {
+				processHeader(currentReceivedHeader)
 			}
 			break
 		}
@@ -325,33 +334,31 @@ func detectMailLoop(rawEmail, serverHostname string, maxHops int) LoopDetectionR
 		if len(line) >= 9 && strings.EqualFold(line[:9], "Received:") {
 			// Process previous Received header if any
 			if currentReceivedHeader != "" {
-				if !foundHostnameLoop && checkReceivedHeaderForLoop(currentReceivedHeader, serverHostname) {
-					foundHostnameLoop = true
-					result.LoopHostname = serverHostname
-				}
+				processHeader(currentReceivedHeader)
 			}
 
 			// Start new Received header
 			result.HopCount++
 			currentReceivedHeader = line
-		} else if currentReceivedHeader != "" && (line[0] == ' ' || line[0] == '\t') {
+		} else if currentReceivedHeader != "" && len(line) > 0 && (line[0] == ' ' || line[0] == '\t') {
 			// Continuation of current Received header (RFC 5322 folding)
 			currentReceivedHeader += " " + strings.TrimSpace(line)
 		} else {
 			// This is a different header, process accumulated Received header if any
 			if currentReceivedHeader != "" {
-				if !foundHostnameLoop && checkReceivedHeaderForLoop(currentReceivedHeader, serverHostname) {
-					foundHostnameLoop = true
-					result.LoopHostname = serverHostname
-				}
+				processHeader(currentReceivedHeader)
 				currentReceivedHeader = ""
 			}
 		}
 	}
 
-	// Set loop flag based on findings
-	if foundHostnameLoop {
+	result.HostnameCount = hostnameCount
+
+	// A loop is detected when our hostname appears in 2+ Received "by" clauses.
+	// A single occurrence is normal for mailing lists/forwarding scenarios.
+	if hostnameCount >= 2 {
 		result.IsLoop = true
+		result.LoopHostname = serverHostname
 		return result
 	}
 

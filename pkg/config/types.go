@@ -114,11 +114,11 @@ type ServerReputationConfig struct {
 
 // ServerReputationDNSBLConfig holds DNSBL checking configuration for reputation
 type ServerReputationDNSBLConfig struct {
-	Enabled        bool     `toml:"enabled"`          // Enable DNSBL checking (default: false)
-	IPv4Lists      []string `toml:"ipv4_lists"`       // DNS blacklist servers for IPv4 (e.g., ["zen.spamhaus.org", "bl.spamcop.net"])
-	IPv6Lists      []string `toml:"ipv6_lists"`       // DNS blacklist servers for IPv6 (e.g., ["zen.spamhaus.org"])
-	TimeoutSeconds int      `toml:"timeout_seconds"`  // Timeout for DNSBL queries in seconds (default: 3)
-	Weight         int64    `toml:"weight"`           // Negative reputation weight for DNSBL hits (default: 5)
+	Enabled        bool     `toml:"enabled"`         // Enable DNSBL checking (default: false)
+	IPv4Lists      []string `toml:"ipv4_lists"`      // DNS blacklist servers for IPv4 (e.g., ["zen.spamhaus.org", "bl.spamcop.net"])
+	IPv6Lists      []string `toml:"ipv6_lists"`      // DNS blacklist servers for IPv6 (e.g., ["zen.spamhaus.org"])
+	TimeoutSeconds int      `toml:"timeout_seconds"` // Timeout for DNSBL queries in seconds (default: 3)
+	Weight         int64    `toml:"weight"`          // Negative reputation weight for DNSBL hits (default: 5)
 }
 
 // ServerAuthConfig holds authentication configuration for submission servers
@@ -200,8 +200,8 @@ type ServerAuthCacheConfig struct {
 // Removed: ServerSPFConfig, ServerDKIMConfig, ServerDMARCConfig, ServerARCConfig
 // ServerDNSChecksConfig holds DNS validation checks
 type ServerDNSChecksConfig struct {
-	RequireRDNS          bool `toml:"require_rdns"`           // Require reverse DNS for sender IP
-	RequireSenderMX      bool `toml:"require_sender_mx"`      // Require sender domain to have MX records
+	RequireRDNS           bool `toml:"require_rdns"`            // Require reverse DNS for sender IP
+	RequireSenderMX       bool `toml:"require_sender_mx"`       // Require sender domain to have MX records
 	RequireResolvableHELO bool `toml:"require_resolvable_helo"` // Require HELO hostname to have DNS records (default: false)
 }
 
