@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"flag"
@@ -803,11 +801,12 @@ func handleTLSList(ctx context.Context) {
 		fatal("Failed to list certificates: %v", err)
 	}
 
-	// Filter for certificate files
+	// Collect all certificate objects
 	var certs []CertificateInfo
 	for _, obj := range objects {
-		// Skip non-certificate files (acme account keys, etc.)
-		if !strings.HasSuffix(obj.Key, hashDomain("")) && !isCertificateKey(obj.Key, cfg) {
+		// Skip acme account keys and token files
+		filename := filepath.Base(obj.Key)
+		if strings.HasPrefix(filename, "acme_account") {
 			continue
 		}
 
@@ -817,8 +816,11 @@ func handleTLSList(ctx context.Context) {
 			LastModified: obj.LastModified,
 		}
 
-		// Try to determine domain from cert key
-		certInfo.Domain = tryDecodeDomain(obj.Key, cfg)
+		// Domain is the filename (e.g., "example.com", "example.com+rsa")
+		certInfo.Domain = filename
+		if strings.HasSuffix(filename, "+rsa") {
+			certInfo.Domain = strings.TrimSuffix(filename, "+rsa") + " (RSA)"
+		}
 
 		// Download and parse certificate for more details
 		reader, err := backend.GetObject(ctx, obj.Key)
@@ -905,10 +907,10 @@ func handleTLSDelete(ctx context.Context) {
 	fmt.Println()
 
 	// Compute S3 keys for both ECDSA and RSA variants
-	// The server stores certs at: S3Prefix + "certs/" + "autocert/"
+	// Certificates are stored with plain domain names: prefix + domain, prefix + domain+rsa
 	prefix := cfg.Storage.S3Prefix + "certs/autocert/"
-	ecdsaKey := prefix + hashDomain(domain)
-	rsaKey := prefix + hashDomain(domain+"+rsa")
+	ecdsaKey := prefix + domain
+	rsaKey := prefix + domain + "+rsa"
 
 	deleted := 0
 	notFound := 0
@@ -989,8 +991,9 @@ func handleTLSClean(ctx context.Context) {
 	}
 
 	for _, obj := range objects {
-		// Skip non-certificate files
-		if !isCertificateKey(obj.Key, cfg) {
+		// Skip acme account keys and token files
+		filename := filepath.Base(obj.Key)
+		if strings.HasPrefix(filename, "acme_account") {
 			continue
 		}
 
@@ -1004,9 +1007,15 @@ func handleTLSClean(ctx context.Context) {
 		certData, _ := io.ReadAll(reader)
 		reader.Close()
 
+		// Domain is the filename (e.g., "example.com", "example.com+rsa")
+		domain := filename
+		if strings.HasSuffix(filename, "+rsa") {
+			domain = strings.TrimSuffix(filename, "+rsa") + " (RSA)"
+		}
+
 		certInfo := CertificateInfo{
 			S3Key:  obj.Key,
-			Domain: tryDecodeDomain(obj.Key, cfg),
+			Domain: domain,
 		}
 		parseCertificateData(certData, &certInfo)
 
@@ -1285,65 +1294,6 @@ func initStorageBackend(ctx context.Context, cfg *config.Config) (storage.Backen
 	default:
 		return nil, fmt.Errorf("unsupported storage backend: %s", cfg.Storage.Backend)
 	}
-}
-
-func hashDomain(domain string) string {
-	h := sha256.Sum256([]byte(domain))
-	return hex.EncodeToString(h[:])
-}
-
-func isCertificateKey(key string, cfg *config.Config) bool {
-	// Check if key matches any configured domain hash
-	if cfg.TLS.LetsEncrypt.Domains != nil {
-		for _, domain := range cfg.TLS.LetsEncrypt.Domains {
-			if strings.HasSuffix(key, hashDomain(domain)) {
-				return true
-			}
-			if strings.HasSuffix(key, hashDomain(domain+"+rsa")) {
-				return true
-			}
-		}
-	}
-
-	// If no domains configured, try basic pattern matching
-	// autocert stores files with SHA256 hash names (64 hex chars)
-	filename := filepath.Base(key)
-	if len(filename) == 64 {
-		// Check if it's a valid hex string
-		if _, err := hex.DecodeString(filename); err == nil {
-			return true
-		}
-	}
-
-	return false
-}
-
-func tryDecodeDomain(s3Key string, cfg *config.Config) string {
-	// Extract hash from key
-	parts := strings.Split(s3Key, "/cert-")
-	if len(parts) != 2 {
-		return "unknown"
-	}
-
-	hash := parts[1]
-
-	// Try configured domains
-	if cfg.TLS.LetsEncrypt.Domains != nil {
-		for _, domain := range cfg.TLS.LetsEncrypt.Domains {
-			if hashDomain(domain) == hash {
-				return domain
-			}
-			if hashDomain(domain+"+rsa") == hash {
-				return domain + " (RSA)"
-			}
-		}
-	}
-
-	// Show truncated hash if domain not found
-	if len(hash) > 16 {
-		return hash[:16] + "..."
-	}
-	return hash
 }
 
 func parseCertificateData(data []byte, info *CertificateInfo) {

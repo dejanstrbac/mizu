@@ -171,8 +171,8 @@ func TestStorageCache_DeleteNonexistent(t *testing.T) {
 	t.Log("✓ Delete of non-existent key succeeds")
 }
 
-// TestStorageCache_KeyHashing tests that keys are properly hashed
-func TestStorageCache_KeyHashing(t *testing.T) {
+// TestStorageCache_SpecialCharacterKeys tests that keys with special characters work
+func TestStorageCache_SpecialCharacterKeys(t *testing.T) {
 	tempDir, err := os.MkdirTemp("", "mizu-tls-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -195,39 +195,42 @@ func TestStorageCache_KeyHashing(t *testing.T) {
 		t.Fatalf("Failed to create storage cache: %v", err)
 	}
 
-	// Test with special characters in domain name
-	testKey := "*.example.com"
-	testData := []byte("wildcard certificate")
-
-	if err := cache.Put(ctx, testKey, testData); err != nil {
-		t.Fatalf("Failed to put data with special characters: %v", err)
+	// Test autocert-style keys (domain names with suffixes)
+	keys := map[string][]byte{
+		"example.com":       []byte("cert1"),
+		"example.com+rsa":   []byte("cert2"),
+		"example.com+token": []byte("cert3"),
+		"acme_account+key":  []byte("account key"),
 	}
 
-	retrievedData, err := cache.Get(ctx, testKey)
-	if err != nil {
-		t.Fatalf("Failed to get data with special characters: %v", err)
+	for key, data := range keys {
+		if err := cache.Put(ctx, key, data); err != nil {
+			t.Fatalf("Failed to put data for key %q: %v", key, err)
+		}
+
+		retrieved, err := cache.Get(ctx, key)
+		if err != nil {
+			t.Fatalf("Failed to get data for key %q: %v", key, err)
+		}
+
+		if string(retrieved) != string(data) {
+			t.Errorf("Data mismatch for key %q", key)
+		}
 	}
 
-	if string(retrievedData) != string(testData) {
-		t.Errorf("Retrieved data mismatch for special characters")
-	}
-
-	// Verify files are actually stored with hashed names
+	// Verify files are stored with readable names (not hashed)
 	files, err := filepath.Glob(filepath.Join(tempDir, "test/autocert", "*"))
 	if err != nil {
 		t.Fatalf("Failed to list files: %v", err)
 	}
 
-	if len(files) == 0 {
-		t.Error("No files found in storage")
+	if len(files) != len(keys) {
+		t.Errorf("Expected %d files, got %d", len(keys), len(files))
 	}
 
-	// Check that filenames don't contain special characters
 	for _, file := range files {
 		basename := filepath.Base(file)
-		if basename != "*.example.com" { // Should be hashed, not literal
-			t.Logf("✓ Keys are properly hashed: %s", basename)
-		}
+		t.Logf("✓ Stored with readable name: %s", basename)
 	}
 }
 

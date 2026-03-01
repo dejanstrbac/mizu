@@ -69,7 +69,7 @@ func (c *S3Cache) verifyBucketAccess(ctx context.Context) error {
 
 // Get retrieves a certificate data from S3.
 func (c *S3Cache) Get(ctx context.Context, key string) ([]byte, error) {
-	s3Key := c.prefix + hashKey(key)
+	s3Key := c.prefix + key
 
 	c.logger.Debug("S3-Cache: Getting certificate", "key", key, "s3_key", s3Key)
 
@@ -84,8 +84,10 @@ func (c *S3Cache) Get(ctx context.Context, key string) ([]byte, error) {
 			c.logger.Debug("S3-Cache: Certificate not found (cache miss)", "key", key)
 			return nil, autocert.ErrCacheMiss
 		}
-		c.logger.Error("S3-Cache: Failed to get object from S3", "error", err)
-		return nil, autocert.ErrCacheMiss
+		// Return the actual error for transient S3 failures (timeout, network, etc.).
+		// Returning ErrCacheMiss here would cause autocert to re-provision certificates.
+		c.logger.Error("S3-Cache: Failed to get object from S3", "key", key, "error", err)
+		return nil, fmt.Errorf("S3 get failed for %s: %w", key, err)
 	}
 	defer result.Body.Close()
 
@@ -102,7 +104,7 @@ func (c *S3Cache) Get(ctx context.Context, key string) ([]byte, error) {
 
 // Put stores certificate data in S3.
 func (c *S3Cache) Put(ctx context.Context, key string, data []byte) error {
-	s3Key := c.prefix + hashKey(key)
+	s3Key := c.prefix + key
 
 	c.logger.Debug("S3-Cache: Putting certificate", "key", key, "s3_key", s3Key, "bytes", len(data))
 
@@ -124,7 +126,7 @@ func (c *S3Cache) Put(ctx context.Context, key string, data []byte) error {
 
 // Delete removes certificate data from S3.
 func (c *S3Cache) Delete(ctx context.Context, key string) error {
-	s3Key := c.prefix + hashKey(key)
+	s3Key := c.prefix + key
 
 	c.logger.Debug("S3-Cache: Deleting certificate", "key", key, "s3_key", s3Key)
 

@@ -28,12 +28,12 @@ func NewClusterAwareCache(cache autocert.Cache, isLeaderF func() bool, logger *s
 // Get retrieves a certificate from the cache (all nodes can read)
 func (c *ClusterAwareCache) Get(ctx context.Context, name string) ([]byte, error) {
 	isLeader := c.isLeaderF()
-	c.logger.Info("ClusterCache: Get certificate request", "name", name, "is_leader", isLeader)
+	c.logger.Debug("ClusterCache: Get certificate request", "name", name, "is_leader", isLeader)
 
 	data, err := c.underlying.Get(ctx, name)
 	if err != nil {
 		if err == autocert.ErrCacheMiss {
-			c.logger.Info("ClusterCache: Certificate not found (cache miss)", "name", name, "is_leader", isLeader)
+			c.logger.Debug("ClusterCache: Certificate not found (cache miss)", "name", name, "is_leader", isLeader)
 		} else {
 			c.logger.Error("ClusterCache: Error getting certificate",
 				"name", name,
@@ -44,7 +44,7 @@ func (c *ClusterAwareCache) Get(ctx context.Context, name string) ([]byte, error
 		return nil, err
 	}
 
-	c.logger.Info("ClusterCache: Certificate retrieved successfully", "name", name, "is_leader", isLeader, "bytes", len(data))
+	c.logger.Debug("ClusterCache: Certificate retrieved successfully", "name", name, "is_leader", isLeader, "bytes", len(data))
 	return data, nil
 }
 
@@ -52,7 +52,7 @@ func (c *ClusterAwareCache) Get(ctx context.Context, name string) ([]byte, error
 func (c *ClusterAwareCache) Put(ctx context.Context, name string, data []byte) error {
 	isLeader := c.isLeaderF()
 
-	c.logger.Info("ClusterCache: Put certificate request", "name", name, "is_leader", isLeader)
+	c.logger.Debug("ClusterCache: Put certificate request", "name", name, "is_leader", isLeader)
 
 	// Check if this node is the cluster leader
 	if !isLeader {

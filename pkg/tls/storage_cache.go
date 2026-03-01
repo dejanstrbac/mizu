@@ -64,7 +64,7 @@ func (c *StorageCache) verifyStorageAccess(ctx context.Context) error {
 
 // Get retrieves a certificate data from storage.
 func (c *StorageCache) Get(ctx context.Context, key string) ([]byte, error) {
-	storageKey := c.prefix + hashKey(key)
+	storageKey := c.prefix + key
 
 	c.logger.Debug("Storage-Cache: Getting certificate", "key", key, "storage_key", storageKey)
 
@@ -106,7 +106,7 @@ func (c *StorageCache) Get(ctx context.Context, key string) ([]byte, error) {
 
 // Put stores certificate data in storage.
 func (c *StorageCache) Put(ctx context.Context, key string, data []byte) error {
-	storageKey := c.prefix + hashKey(key)
+	storageKey := c.prefix + key
 
 	c.logger.Debug("Storage-Cache: Putting certificate", "key", key, "storage_key", storageKey, "bytes", len(data))
 
@@ -135,7 +135,7 @@ func (c *StorageCache) Put(ctx context.Context, key string, data []byte) error {
 
 // Delete removes certificate data from storage.
 func (c *StorageCache) Delete(ctx context.Context, key string) error {
-	storageKey := c.prefix + hashKey(key)
+	storageKey := c.prefix + key
 
 	c.logger.Debug("Storage-Cache: Deleting certificate", "key", key, "storage_key", storageKey)
 
