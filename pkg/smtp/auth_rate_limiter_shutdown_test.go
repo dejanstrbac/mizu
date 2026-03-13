@@ -1,6 +1,7 @@
 package smtp
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"testing"
@@ -86,8 +87,8 @@ func TestAuthRateLimiter_CleanupStopsAfterShutdown(t *testing.T) {
 	}
 
 	// Add some data
-	limiter.RecordAuthAttempt(nil, "192.168.1.1", "user1", false)
-	limiter.RecordAuthAttempt(nil, "192.168.1.2", "user2", false)
+	limiter.RecordAuthAttempt(context.TODO(), "192.168.1.1", "user1", false)
+	limiter.RecordAuthAttempt(context.TODO(), "192.168.1.2", "user2", false)
 
 	// Wait for at least one cleanup cycle
 	time.Sleep(100 * time.Millisecond)
