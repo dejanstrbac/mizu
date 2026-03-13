@@ -1714,11 +1714,6 @@ func (s *Session) validateHeaders(rawEmail string) error {
 
 				s.Logger.Info("Junk header detected", "from", s.from, "header", headerName, "value", headerValue, "action", action)
 
-				// Record this as a junk message for stats
-				if s.statsManager != nil {
-					s.statsManager.RecordJunkMessage(s.remoteAddr)
-				}
-
 				switch action {
 				case "reject":
 					s.Logger.Warn("Rejecting message - junk header present", "from", s.from, "header", headerName)

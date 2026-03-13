@@ -53,6 +53,11 @@ func (m *Manager) mergeIPEntry(ip string, remote *IPExport) int {
 		local.LastSeen = remote.LastSeen
 	}
 
+	// Take latest last negative event time (for decay calculation)
+	if remote.LastNegativeAt.After(local.LastNegativeAt) {
+		local.LastNegativeAt = remote.LastNegativeAt
+	}
+
 	// Max-wins for counters: prevents inflation from repeated sync cycles.
 	// Each node exports its own observed totals; taking max gives the best
 	// cluster-wide estimate without unbounded growth.

@@ -14,12 +14,15 @@ const (
 	WeightJunkMessage      = 1
 	WeightInvalidRecipient = 2
 	WeightSPFFailure       = 3
+	WeightDMARCFailure     = 3
 	WeightDNSBLHit         = 5
 	WeightSpoofingAttempt  = 10
-	WeightDMARCFailure     = 10
 
-	// Minimum data threshold
-	MinDataThreshold = 10
+	// Minimum data threshold — Laplace smoothing constant that prevents
+	// wild reputation swings when only a few events have been observed.
+	// Higher values make the system more conservative (slower to condemn
+	// or trust a new IP).
+	MinDataThreshold = 20
 
 	// Reputation threshold for denial
 	ReputationDenyThreshold = -0.2
@@ -27,46 +30,39 @@ const (
 
 // IPEntry tracks reputation for an IP address
 type IPEntry struct {
-	FirstSeen   time.Time
-	LastSeen    time.Time
-	Connections int64               // Total connections from this IP
-	Positive    int64               // Ham messages delivered
-	Negative    int64               // Junk + failed recipients + spoofing + DMARC failures
-	IsDenied    bool                // Set true if no rDNS
-	Servers     map[string]struct{} // Config server names that saw this IP
-	mu          sync.RWMutex
+	FirstSeen      time.Time
+	LastSeen       time.Time
+	LastNegativeAt time.Time           // Time of last negative event (for decay calculation)
+	Connections    int64               // Total connections from this IP
+	Positive       int64               // Ham messages delivered
+	Negative       int64               // Junk + failed recipients + spoofing + DMARC failures
+	IsDenied       bool                // Set true if no rDNS
+	Servers        map[string]struct{} // Config server names that saw this IP
+	mu             sync.RWMutex
 }
 
-// AddPositive adds a positive score with redemption logic
+// AddPositive increments the positive (ham) counter.
+// The reputation score is computed from the ratio of Positive to Negative
+// using Laplace smoothing, so there is no need for cross-counter adjustment.
 func (e *IPEntry) AddPositive(weight int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	e.Positive += weight
-	// Redemption: reduce negative score, but not below 0
-	if e.Negative > 0 {
-		e.Negative -= weight
-		if e.Negative < 0 {
-			e.Negative = 0
-		}
-	}
 	e.LastSeen = time.Now()
 }
 
-// AddNegative adds a negative score with penalty logic
+// AddNegative increments the negative (junk/failure) counter.
+// The reputation score is computed from the ratio of Positive to Negative
+// using Laplace smoothing, so there is no need for cross-counter adjustment.
 func (e *IPEntry) AddNegative(weight int64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	now := time.Now()
 	e.Negative += weight
-	// Penalty: reduce positive score, but not below 0
-	if e.Positive > 0 {
-		e.Positive -= weight
-		if e.Positive < 0 {
-			e.Positive = 0
-		}
-	}
-	e.LastSeen = time.Now()
+	e.LastNegativeAt = now
+	e.LastSeen = now
 }
 
 // IncrementConnections increments the connection count
@@ -87,24 +83,27 @@ func (e *IPEntry) GetReputation() float64 {
 // getReputationLocked computes the reputation score without acquiring locks.
 // Caller must hold e.mu.RLock() or e.mu.Lock().
 func (e *IPEntry) getReputationLocked() float64 {
-	if e.Connections < MinDataThreshold {
-		return 0 // Neutral - not enough data
-	}
-
-	// Apply time decay to the negative score.
-	// This allows reputation to self-heal over time if no new negative events occur.
-	// The decay is linear, reaching zero after 24 hours of inactivity.
-	hoursSinceLastSeen := time.Since(e.LastSeen).Hours()
-	decayFactor := 1.0 - (hoursSinceLastSeen / 24.0)
-	if decayFactor < 0 {
+	// Apply time decay to the negative score based on when the last negative
+	// event occurred (not LastSeen). This ensures that an actively-sending IP
+	// whose negative events are old sees its negative score decay, even if new
+	// positive events (connections, ham deliveries) keep refreshing LastSeen.
+	// The decay is linear, reaching zero after 24 hours since the last negative event.
+	decayFactor := 1.0
+	if !e.LastNegativeAt.IsZero() {
+		hoursSinceLastNegative := time.Since(e.LastNegativeAt).Hours()
+		decayFactor = 1.0 - (hoursSinceLastNegative / 24.0)
+		if decayFactor < 0 {
+			decayFactor = 0
+		}
+	} else {
+		// No negative events recorded — decay everything
 		decayFactor = 0
 	}
 	decayedNegative := float64(e.Negative) * decayFactor
 
-	total := float64(e.Positive) + decayedNegative
-	if total == 0 {
-		return 0
-	}
+	// Laplace smoothing with MinDataThreshold to prevent wild swings on small data
+	smoothing := float64(MinDataThreshold)
+	total := float64(e.Positive) + decayedNegative + smoothing
 
 	// Return reputation score: -1 (worst) to +1 (best)
 	return (float64(e.Positive) - decayedNegative) / total
@@ -117,10 +116,6 @@ func (e *IPEntry) ShouldDeny() bool {
 
 	if e.IsDenied { // No rDNS
 		return true
-	}
-
-	if e.Connections < MinDataThreshold {
-		return false // Not enough data
 	}
 
 	// Deny if reputation < -0.2
@@ -167,13 +162,14 @@ func (e *IPEntry) GetIsDenied() bool {
 
 // IPExport is the JSON-serializable version of IPEntry
 type IPExport struct {
-	FirstSeen   time.Time `json:"first_seen"`
-	LastSeen    time.Time `json:"last_seen"`
-	Connections int64     `json:"connections"`
-	Positive    int64     `json:"positive"`
-	Negative    int64     `json:"negative"`
-	IsDenied    bool      `json:"is_denied"`
-	Servers     []string  `json:"servers,omitempty"`
+	FirstSeen      time.Time `json:"first_seen"`
+	LastSeen       time.Time `json:"last_seen"`
+	LastNegativeAt time.Time `json:"last_negative_at,omitempty"`
+	Connections    int64     `json:"connections"`
+	Positive       int64     `json:"positive"`
+	Negative       int64     `json:"negative"`
+	IsDenied       bool      `json:"is_denied"`
+	Servers        []string  `json:"servers,omitempty"`
 }
 
 // ExportSummary provides per-server message counts in exports
@@ -204,13 +200,14 @@ func (e *IPEntry) ToExport() *IPExport {
 	}
 
 	return &IPExport{
-		FirstSeen:   e.FirstSeen,
-		LastSeen:    e.LastSeen,
-		Connections: e.Connections,
-		Positive:    e.Positive,
-		Negative:    e.Negative,
-		IsDenied:    e.IsDenied,
-		Servers:     servers,
+		FirstSeen:      e.FirstSeen,
+		LastSeen:       e.LastSeen,
+		LastNegativeAt: e.LastNegativeAt,
+		Connections:    e.Connections,
+		Positive:       e.Positive,
+		Negative:       e.Negative,
+		IsDenied:       e.IsDenied,
+		Servers:        servers,
 	}
 }
 
@@ -221,6 +218,7 @@ func (e *IPEntry) FromExport(export *IPExport) {
 
 	e.FirstSeen = export.FirstSeen
 	e.LastSeen = export.LastSeen
+	e.LastNegativeAt = export.LastNegativeAt
 	e.Connections = export.Connections
 	e.Positive = export.Positive
 	e.Negative = export.Negative

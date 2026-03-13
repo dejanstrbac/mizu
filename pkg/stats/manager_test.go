@@ -392,11 +392,11 @@ func TestManagerMailingListScenario(t *testing.T) {
 		t.Fatal("IP entry not created")
 	}
 
-	// AddPositive has a redemption mechanism that reduces Negative.
+	// Counters accumulate independently (no cross-penalty).
 	// After InvalidRecipient: Positive=0, Negative=2
-	// After HamDelivery(99):  Positive=0+99=99, Negative=max(2-99,0)=0
+	// After HamDelivery(99):  Positive=99, Negative=2
 	expectedPositive := WeightHamDelivery * int64(99) // 99
-	expectedNegative := int64(0)                      // reduced to 0 by redemption
+	expectedNegative := int64(WeightInvalidRecipient) // 2 — unchanged by AddPositive
 
 	if ipEntry.GetPositive() != expectedPositive {
 		t.Errorf("IP Positive = %d; want %d", ipEntry.GetPositive(), expectedPositive)
@@ -435,6 +435,7 @@ func TestManagerCheckIPReputation(t *testing.T) {
 	entry := manager.getOrCreateIP(ip)
 	entry.Connections = 20
 	entry.Negative = 15
+	entry.LastNegativeAt = time.Now()
 	entry.Positive = 5
 
 	shouldDeny, reputation = manager.CheckIPReputation(ip)

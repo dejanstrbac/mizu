@@ -18,6 +18,7 @@ func TestIPEntry_GetReputation_TimeDecay(t *testing.T) {
 		positive      int64
 		negative      int64
 		lastSeen      time.Time
+		lastNegAt     time.Time
 		connections   int64
 		expectedScore float64
 	}{
@@ -26,66 +27,74 @@ func TestIPEntry_GetReputation_TimeDecay(t *testing.T) {
 			positive:      10,
 			negative:      10,
 			lastSeen:      time.Now(),
+			lastNegAt:     time.Now(),
 			connections:   MinDataThreshold,
-			expectedScore: 0.0, // decayedNegative = 10. (10 - 10) / (10 + 10) = 0
+			expectedScore: 0.0, // (10 - 10) / (10 + 10 + 20) = 0/40 = 0
 		},
 		{
 			name:          "Half decay - 12 hours ago",
 			positive:      10,
 			negative:      10,
-			lastSeen:      time.Now().Add(-12 * time.Hour),
+			lastSeen:      time.Now(),
+			lastNegAt:     time.Now().Add(-12 * time.Hour),
 			connections:   MinDataThreshold,
-			expectedScore: 0.333, // decayedNegative = 10 * 0.5 = 5. (10 - 5) / (10 + 5) = 5 / 15
+			expectedScore: 0.143, // decayed=5. (10 - 5) / (10 + 5 + 20) = 5/35 ≈ 0.143
 		},
 		{
 			name:          "Full decay - 24 hours ago",
 			positive:      10,
 			negative:      10,
-			lastSeen:      time.Now().Add(-24 * time.Hour),
+			lastSeen:      time.Now(),
+			lastNegAt:     time.Now().Add(-24 * time.Hour),
 			connections:   MinDataThreshold,
-			expectedScore: 1.0, // decayedNegative = 0. (10 - 0) / (10 + 0) = 1
+			expectedScore: 0.333, // decayed=0. (10 - 0) / (10 + 0 + 20) = 10/30 ≈ 0.333
 		},
 		{
 			name:          "Full decay - more than 24 hours ago",
 			positive:      10,
 			negative:      10,
-			lastSeen:      time.Now().Add(-48 * time.Hour),
+			lastSeen:      time.Now(),
+			lastNegAt:     time.Now().Add(-48 * time.Hour),
 			connections:   MinDataThreshold,
-			expectedScore: 1.0, // decayedNegative = 0. (10 - 0) / (10 + 0) = 1
+			expectedScore: 0.333, // decayed=0. (10 - 0) / (10 + 0 + 20) = 10/30 ≈ 0.333
 		},
 		{
 			name:          "No positive score, half decay",
 			positive:      0,
 			negative:      10,
-			lastSeen:      time.Now().Add(-12 * time.Hour),
+			lastSeen:      time.Now(),
+			lastNegAt:     time.Now().Add(-12 * time.Hour),
 			connections:   MinDataThreshold,
-			expectedScore: -1.0, // decayedNegative = 5. (0 - 5) / (0 + 5) = -1
+			expectedScore: -0.2, // decayed=5. (0 - 5) / (0 + 5 + 20) = -5/25 = -0.2
 		},
 		{
 			name:          "No positive score, full decay",
 			positive:      0,
 			negative:      10,
-			lastSeen:      time.Now().Add(-24 * time.Hour),
+			lastSeen:      time.Now(),
+			lastNegAt:     time.Now().Add(-24 * time.Hour),
 			connections:   MinDataThreshold,
-			expectedScore: 0.0, // decayedNegative = 0. total = 0.
+			expectedScore: 0.0, // decayed=0. (0 - 0) / (0 + 0 + 20) = 0
 		},
 		{
-			name:          "Not enough data",
-			positive:      10,
-			negative:      10,
+			name:          "Not enough data - smoothed",
+			positive:      0,
+			negative:      2,
 			lastSeen:      time.Now(),
-			connections:   MinDataThreshold - 1,
-			expectedScore: 0.0, // Should return neutral score
+			lastNegAt:     time.Now(),
+			connections:   1,
+			expectedScore: -0.0909, // (0 - 2) / (0 + 2 + 20) = -2/22 ≈ -0.0909
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			entry := &IPEntry{
-				Positive:    tt.positive,
-				Negative:    tt.negative,
-				LastSeen:    tt.lastSeen,
-				Connections: tt.connections,
+				Positive:       tt.positive,
+				Negative:       tt.negative,
+				LastSeen:       tt.lastSeen,
+				LastNegativeAt: tt.lastNegAt,
+				Connections:    tt.connections,
 			}
 
 			score := entry.GetReputation()
@@ -93,6 +102,128 @@ func TestIPEntry_GetReputation_TimeDecay(t *testing.T) {
 				t.Errorf("IPEntry.GetReputation() = %v, want %v", score, tt.expectedScore)
 			}
 		})
+	}
+}
+
+// TestIPEntry_DecayUsesLastNegativeAt verifies that the decay is based on
+// LastNegativeAt (when the last negative event occurred), NOT LastSeen
+// (when the IP was last active). This is critical: an IP that keeps connecting
+// and delivering ham should see its old negative events decay, even though
+// LastSeen stays recent.
+func TestIPEntry_DecayUsesLastNegativeAt(t *testing.T) {
+	// Scenario: Amazon SES sent 2 junk messages 6 hours ago, then kept
+	// sending good emails. LastSeen is recent, but LastNegativeAt is 6h old.
+	entry := &IPEntry{
+		Positive:       10,
+		Negative:       6,
+		LastSeen:       time.Now(),                     // just connected
+		LastNegativeAt: time.Now().Add(-6 * time.Hour), // last junk was 6h ago
+		Connections:    MinDataThreshold,
+	}
+
+	// Decay factor for 6h: 1 - (6/24) = 0.75
+	// Decayed negative: 6 * 0.75 = 4.5
+	// Score: (10 - 4.5) / (10 + 4.5 + 20) = 5.5/34.5 ≈ 0.159
+	rep := entry.GetReputation()
+	if rep <= 0 {
+		t.Errorf("Reputation = %f; should be positive (negative events are 6h old)", rep)
+	}
+	if !almostEqual(rep, 0.159) {
+		t.Errorf("Reputation = %f; want ~0.159", rep)
+	}
+
+	// Compare: if decay wrongly used LastSeen (which is now), decay=1.0,
+	// score would be (10-6)/(10+6+20) = 4/36 = 0.111 — still positive but lower.
+	// The difference is more dramatic with larger negative values.
+
+	// Now test with LastSeen old but LastNegativeAt recent (rare but possible
+	// via cluster merge). Decay should NOT apply since negative events are fresh.
+	entry2 := &IPEntry{
+		Positive:       10,
+		Negative:       6,
+		LastSeen:       time.Now().Add(-12 * time.Hour), // hasn't been seen in 12h
+		LastNegativeAt: time.Now(),                      // but negative event is fresh
+		Connections:    MinDataThreshold,
+	}
+	rep2 := entry2.GetReputation()
+	// No decay: (10-6)/(10+6+20) = 4/36 ≈ 0.111
+	if !almostEqual(rep2, 0.111) {
+		t.Errorf("Reputation = %f; want ~0.111 (no decay, fresh negative)", rep2)
+	}
+}
+
+// TestIPEntry_DecayWithNoNegativeEvents verifies that if an IP has never
+// had negative events (LastNegativeAt is zero), all accumulated negative
+// score (e.g. from cluster merge) decays to zero.
+func TestIPEntry_DecayWithNoNegativeEvents(t *testing.T) {
+	entry := &IPEntry{
+		Positive:    10,
+		Negative:    5, // e.g. from cluster merge with no LastNegativeAt
+		LastSeen:    time.Now(),
+		Connections: MinDataThreshold,
+		// LastNegativeAt is zero value — no negative events recorded locally
+	}
+
+	// With LastNegativeAt zero, decayFactor=0, so decayedNegative=0
+	// Score: (10-0)/(10+0+20) = 10/30 ≈ 0.333
+	rep := entry.GetReputation()
+	if !almostEqual(rep, 0.333) {
+		t.Errorf("Reputation = %f; want ~0.333 (zero-time negative fully decayed)", rep)
+	}
+}
+
+// TestIPEntry_AmazonSESExactScenario reproduces the exact log sequence from
+// the bug report: 2 junk emails 20 minutes apart, then connection 20 minutes later.
+func TestIPEntry_AmazonSESExactScenario(t *testing.T) {
+	now := time.Now()
+
+	entry := &IPEntry{
+		Connections: 3,   // 3 connections total
+		LastSeen:    now, // latest connection just now
+	}
+
+	// 14:28 — first junk email delivered
+	// 14:48 — second junk email delivered (LastNegativeAt)
+	// 15:08 — new connection (LastSeen = now)
+	entry.Negative = 2 * WeightJunkMessage            // 2 junk messages
+	entry.LastNegativeAt = now.Add(-20 * time.Minute) // 20 min ago
+
+	// Decay factor: 1 - (0.333h / 24h) = 0.986
+	// Decayed negative: 2 * 0.986 = 1.972
+	// Score: (0 - 1.972) / (0 + 1.972 + 20) = -1.972/21.972 ≈ -0.0898
+	rep := entry.GetReputation()
+	t.Logf("Amazon SES 20min scenario: reputation=%.4f (threshold=%.1f)", rep, ReputationDenyThreshold)
+
+	if rep < ReputationDenyThreshold {
+		t.Errorf("Reputation = %f; should NOT be below deny threshold %f", rep, ReputationDenyThreshold)
+	}
+	if entry.ShouldDeny() {
+		t.Error("Amazon SES IP should NOT be denied after 2 junk emails 20min ago")
+	}
+
+	// Even after 1 hour, it should still not be denied
+	entry.LastNegativeAt = now.Add(-1 * time.Hour)
+	rep = entry.GetReputation()
+	t.Logf("Amazon SES 1h scenario: reputation=%.4f", rep)
+	if entry.ShouldDeny() {
+		t.Error("Amazon SES IP should NOT be denied after 2 junk emails 1h ago")
+	}
+
+	// After 12 hours, negative should be half-decayed
+	entry.LastNegativeAt = now.Add(-12 * time.Hour)
+	rep = entry.GetReputation()
+	t.Logf("Amazon SES 12h scenario: reputation=%.4f (negative half-decayed)", rep)
+	// Decayed negative = 2 * 0.5 = 1, score = (0-1)/(0+1+20) = -1/21 ≈ -0.048
+	if !almostEqual(rep, -0.048) {
+		t.Errorf("Reputation = %f; want ~-0.048", rep)
+	}
+
+	// After 24 hours, negative fully decayed
+	entry.LastNegativeAt = now.Add(-24 * time.Hour)
+	rep = entry.GetReputation()
+	t.Logf("Amazon SES 24h scenario: reputation=%.4f (negative fully decayed)", rep)
+	if rep != 0 {
+		t.Errorf("Reputation = %f; want 0 (fully decayed)", rep)
 	}
 }
 
@@ -127,11 +258,9 @@ func TestIPEntry_MultiRecipientHamDelivery(t *testing.T) {
 // TestIPEntry_MailingListScenario tests the exact bug scenario:
 // Google Groups sends to 100 recipients, 1 is invalid, 99 delivered.
 //
-// OLD behavior (per-message): +1 positive, -2 negative → net -1 ❌
-// NEW behavior (per-recipient): +99 positive, -2 negative → net +97 ✅
-//
-// Due to the redemption mechanism in AddPositive, the final state is:
-// Positive=99, Negative=max(2-99, 0)=0, net=99
+// Without cross-penalty, counters accumulate independently:
+// Positive=99, Negative=2 (WeightInvalidRecipient)
+// Reputation = (99 - 2) / (99 + 2 + 20) = 97/121 ≈ 0.802
 func TestIPEntry_MailingListScenario(t *testing.T) {
 	entry := &IPEntry{
 		Connections: MinDataThreshold, // Enough data for reputation calculation
@@ -152,58 +281,24 @@ func TestIPEntry_MailingListScenario(t *testing.T) {
 		t.Errorf("After delivery: Positive = %d; want 99", entry.Positive)
 	}
 
-	// Redemption reduces negative: 2 - 99 → clamped to 0
-	if entry.Negative != 0 {
-		t.Errorf("After delivery redemption: Negative = %d; want 0", entry.Negative)
+	// No cross-penalty: Negative stays at 2
+	if entry.Negative != WeightInvalidRecipient {
+		t.Errorf("After delivery: Negative = %d; want %d (no cross-penalty)", entry.Negative, WeightInvalidRecipient)
 	}
 
 	// Reputation should be strongly positive
+	// (99 - 2) / (99 + 2 + 20) = 97/121 ≈ 0.802
 	rep := entry.GetReputation()
 	if rep <= 0 {
 		t.Errorf("Reputation = %f; should be positive for legitimate mailing list", rep)
 	}
-	if rep != 1.0 {
-		t.Errorf("Reputation = %f; want 1.0 (all positive, zero negative)", rep)
+	if !almostEqual(rep, 0.802) {
+		t.Errorf("Reputation = %f; want ~0.802 (97 / 121)", rep)
 	}
 
 	// Should NOT be denied
 	if entry.ShouldDeny() {
 		t.Error("Legitimate mailing list should not be denied")
-	}
-}
-
-// TestIPEntry_OldBehaviorWouldFail demonstrates that the old per-message
-// scoring would have produced a negative reputation.
-func TestIPEntry_OldBehaviorWouldFail(t *testing.T) {
-	entry := &IPEntry{
-		Connections: MinDataThreshold,
-		LastSeen:    time.Now(),
-	}
-
-	// Old behavior: 1 invalid recipient
-	entry.AddNegative(WeightInvalidRecipient) // -2
-
-	// Old behavior: only +1 per message (not per recipient!)
-	entry.AddPositive(WeightHamDelivery * 1) // +1
-
-	// With old per-message scoring:
-	// Positive = 1, Negative = max(2-1, 0) = 1
-	// Net reputation = (1 - 1) / (1 + 1) = 0
-	// This is neutral at best, which is wrong for 99% successful delivery
-	if entry.Positive != 1 {
-		t.Errorf("Old behavior Positive = %d; want 1", entry.Positive)
-	}
-	if entry.Negative != 1 {
-		t.Errorf("Old behavior Negative = %d; want 1 (2 reduced by redemption of 1)", entry.Negative)
-	}
-
-	rep := entry.GetReputation()
-	t.Logf("Old per-message behavior: positive=%d, negative=%d, reputation=%f (would be unfair to mailing lists)",
-		entry.Positive, entry.Negative, rep)
-
-	// The reputation is 0 or very low - this is the bug we fixed
-	if rep > 0.5 {
-		t.Errorf("Old behavior should NOT produce a strong positive reputation, got %f", rep)
 	}
 }
 
@@ -223,9 +318,8 @@ func TestIPEntry_BulkSpammerStillDenied(t *testing.T) {
 	// Only 5 successful deliveries
 	entry.AddPositive(WeightHamDelivery * 5) // +5
 
-	// Negative should still be dominant
-	// After penalty: Positive = max(0-100+5, ...) complex redemption
-	// Negative dominates significantly
+	// Negative = 100, Positive = 5
+	// Reputation = (5 - 100) / (5 + 100 + 20) = -95/125 = -0.76
 	rep := entry.GetReputation()
 	if rep >= 0 {
 		t.Errorf("Spammer reputation = %f; should be negative", rep)
@@ -240,9 +334,10 @@ func TestIPEntry_BulkSpammerStillDenied(t *testing.T) {
 		entry.Positive, entry.Negative, rep)
 }
 
-// TestIPEntry_RedemptionMechanicsWithMultiRecipient tests that the
-// redemption mechanism works correctly with large positive weights.
-func TestIPEntry_RedemptionMechanicsWithMultiRecipient(t *testing.T) {
+// TestIPEntry_IndependentCounters tests that AddPositive and AddNegative
+// do NOT cross-modify the other counter. This prevents wild reputation
+// swings from a single event erasing accumulated history.
+func TestIPEntry_IndependentCounters(t *testing.T) {
 	tests := []struct {
 		name             string
 		negativeFirst    int64 // applied first via AddNegative
@@ -254,29 +349,29 @@ func TestIPEntry_RedemptionMechanicsWithMultiRecipient(t *testing.T) {
 			name:             "Small negative, large positive",
 			negativeFirst:    2,  // 1 invalid recipient
 			positiveWeight:   99, // 99 successful deliveries
-			expectedPositive: 99, // 99 added
-			expectedNegative: 0,  // 2 - 99 → clamped to 0
+			expectedPositive: 99,
+			expectedNegative: 2, // unchanged
 		},
 		{
 			name:             "Equal negative and positive",
 			negativeFirst:    10,
 			positiveWeight:   10,
 			expectedPositive: 10,
-			expectedNegative: 0, // 10 - 10 = 0
+			expectedNegative: 10, // unchanged
 		},
 		{
 			name:             "Large negative, small positive",
 			negativeFirst:    100,
 			positiveWeight:   5,
 			expectedPositive: 5,
-			expectedNegative: 95, // 100 - 5 = 95
+			expectedNegative: 100, // unchanged
 		},
 		{
 			name:             "Zero positive after negative",
 			negativeFirst:    10,
 			positiveWeight:   0,
 			expectedPositive: 0,
-			expectedNegative: 10, // unchanged
+			expectedNegative: 10,
 		},
 		{
 			name:             "No negative, large positive",
@@ -308,9 +403,9 @@ func TestIPEntry_RedemptionMechanicsWithMultiRecipient(t *testing.T) {
 	}
 }
 
-// TestIPEntry_PenaltyMechanicsWithMultiRecipient tests that the penalty
-// mechanism (AddNegative reduces Positive) works with prior multi-recipient credit.
-func TestIPEntry_PenaltyMechanicsWithMultiRecipient(t *testing.T) {
+// TestIPEntry_NegativeAfterPositive tests that AddNegative does NOT
+// reduce the Positive counter.
+func TestIPEntry_NegativeAfterPositive(t *testing.T) {
 	tests := []struct {
 		name             string
 		positiveFirst    int64 // applied first via AddPositive
@@ -322,22 +417,22 @@ func TestIPEntry_PenaltyMechanicsWithMultiRecipient(t *testing.T) {
 			name:             "100 deliveries then 1 invalid",
 			positiveFirst:    100,
 			negativeWeight:   WeightInvalidRecipient, // 2
-			expectedPositive: 98,                     // 100 - 2 = 98
+			expectedPositive: 100,                    // unchanged
 			expectedNegative: 2,
 		},
 		{
 			name:             "100 deliveries then spoofing attempt",
 			positiveFirst:    100,
 			negativeWeight:   WeightSpoofingAttempt, // 10
-			expectedPositive: 90,                    // 100 - 10 = 90
+			expectedPositive: 100,                   // unchanged
 			expectedNegative: 10,
 		},
 		{
 			name:             "5 deliveries then DMARC failure",
 			positiveFirst:    5,
-			negativeWeight:   WeightDMARCFailure, // 10
-			expectedPositive: 0,                  // 5 - 10 → clamped to 0
-			expectedNegative: 10,
+			negativeWeight:   WeightDMARCFailure, // 3
+			expectedPositive: 5,                  // unchanged
+			expectedNegative: 3,
 		},
 	}
 
@@ -406,6 +501,7 @@ func TestIPEntry_ReputationScoreWithMultiRecipient(t *testing.T) {
 					e.AddNegative(WeightInvalidRecipient) // 8 × -2 = -16
 				}
 				e.AddPositive(2) // only 2 successful
+				// Reputation = (2-16)/(2+16+20) = -14/38 = -0.368 → denied
 			},
 			wantDeny:    true,
 			wantRepSign: -1,
@@ -417,6 +513,7 @@ func TestIPEntry_ReputationScoreWithMultiRecipient(t *testing.T) {
 				for i := 0; i < 50; i++ {
 					e.AddNegative(WeightJunkMessage) // 50 × -1 = -50
 				}
+				// Reputation = (0-50)/(0+50+20) = -50/70 = -0.714 → denied
 			},
 			wantDeny:    true,
 			wantRepSign: -1,
@@ -432,18 +529,46 @@ func TestIPEntry_ReputationScoreWithMultiRecipient(t *testing.T) {
 				for i := 0; i < 5; i++ {
 					e.AddNegative(WeightInvalidRecipient) // 5 invalid
 				}
+				// Positive=200, Negative=10+10=20
+				// Reputation = (200-20)/(200+20+20) = 180/240 = 0.75
 			},
 			wantDeny:    false,
 			wantRepSign: +1,
 		},
 		{
-			name: "Not enough data: should be neutral",
+			name: "Small amount of negative data: should be negative but not denied",
 			setup: func(e *IPEntry) {
-				e.Connections = MinDataThreshold - 1
-				e.AddPositive(100)
+				e.AddNegative(1) // Just 1 junk message
+				// Reputation = (0-1)/(0+1+20) = -1/21 ≈ -0.048 → NOT denied
 			},
 			wantDeny:    false,
-			wantRepSign: 0,
+			wantRepSign: -1,
+		},
+		{
+			name: "Amazon SES scenario: 3 junk emails should NOT be denied",
+			setup: func(e *IPEntry) {
+				// Simulate 3 emails marked as junk due to missing DMARC
+				for i := 0; i < 3; i++ {
+					e.AddNegative(WeightJunkMessage) // 3 × -1 = -3
+				}
+				// Reputation = (0-3)/(0+3+20) = -3/23 ≈ -0.130 → NOT denied
+			},
+			wantDeny:    false,
+			wantRepSign: -1,
+		},
+		{
+			name: "Amazon SES scenario: 3 junk + 2 ham should NOT be denied",
+			setup: func(e *IPEntry) {
+				e.AddNegative(WeightJunkMessage) // junk
+				e.AddPositive(WeightHamDelivery) // ham
+				e.AddNegative(WeightJunkMessage) // junk
+				e.AddPositive(WeightHamDelivery) // ham
+				e.AddNegative(WeightJunkMessage) // junk
+				// Positive=2, Negative=3
+				// Reputation = (2-3)/(2+3+20) = -1/25 = -0.04 → NOT denied
+			},
+			wantDeny:    false,
+			wantRepSign: -1,
 		},
 	}
 
@@ -456,7 +581,8 @@ func TestIPEntry_ReputationScoreWithMultiRecipient(t *testing.T) {
 			deny := entry.ShouldDeny()
 
 			if deny != tt.wantDeny {
-				t.Errorf("ShouldDeny() = %v; want %v (reputation=%f)", deny, tt.wantDeny, rep)
+				t.Errorf("ShouldDeny() = %v; want %v (reputation=%f, positive=%d, negative=%d)",
+					deny, tt.wantDeny, rep, entry.Positive, entry.Negative)
 			}
 
 			switch tt.wantRepSign {
@@ -499,9 +625,8 @@ func TestIPEntry_MultipleTransactions(t *testing.T) {
 	// Transaction 3: Single email
 	entry.AddPositive(WeightHamDelivery * 1) // +1
 
-	// Total positive contributions: 50 + 28 + 1 = 79
-	// But redemption reduces negative along the way
-	// Net should be strongly positive
+	// Total: Positive = 50 + 28 + 1 = 79, Negative = 2 + 2 = 4
+	// Reputation = (79 - 4) / (79 + 4 + 20) = 75/103 ≈ 0.728
 	rep := entry.GetReputation()
 	if rep <= 0 {
 		t.Errorf("Reputation after multiple transactions = %f; should be positive", rep)
@@ -510,6 +635,55 @@ func TestIPEntry_MultipleTransactions(t *testing.T) {
 		t.Error("IP with mostly good transactions should not be denied")
 	}
 
+	if entry.Positive != 79 {
+		t.Errorf("Positive = %d; want 79", entry.Positive)
+	}
+	if entry.Negative != 4 {
+		t.Errorf("Negative = %d; want 4", entry.Negative)
+	}
+
 	t.Logf("Multiple transactions: positive=%d, negative=%d, reputation=%.3f",
 		entry.Positive, entry.Negative, rep)
+}
+
+// TestIPEntry_WeightDMARCFailure verifies DMARC failure weight is lower than spoofing.
+func TestIPEntry_WeightDMARCFailure(t *testing.T) {
+	if WeightDMARCFailure >= WeightSpoofingAttempt {
+		t.Errorf("WeightDMARCFailure (%d) should be less than WeightSpoofingAttempt (%d)",
+			WeightDMARCFailure, WeightSpoofingAttempt)
+	}
+	if WeightDMARCFailure != 3 {
+		t.Errorf("WeightDMARCFailure = %d; want 3", WeightDMARCFailure)
+	}
+}
+
+// TestIPEntry_MinDataThresholdSmoothing verifies that the smoothing constant
+// prevents small amounts of negative data from immediately denying an IP.
+func TestIPEntry_MinDataThresholdSmoothing(t *testing.T) {
+	// With MinDataThreshold=20, even 5 junk messages shouldn't deny
+	entry := &IPEntry{LastSeen: time.Now()}
+	for i := 0; i < 5; i++ {
+		entry.AddNegative(WeightJunkMessage) // 5 × 1 = 5
+	}
+
+	// Reputation = (0 - 5) / (0 + 5 + 20) = -5/25 = -0.2
+	// This is exactly at the threshold boundary, so should NOT be denied
+	// (the check is strictly less than -0.2)
+	rep := entry.GetReputation()
+	t.Logf("5 junk messages: reputation=%.4f (threshold=%.1f)", rep, ReputationDenyThreshold)
+
+	// With smoothing=20, need more negative weight to cross -0.2
+	// N/(N+20) > 0.2 → N > 0.2*(N+20) → 0.8N > 4 → N > 5
+	// So 5 is exactly at boundary, 6+ should deny
+	if entry.ShouldDeny() {
+		t.Error("5 junk messages should NOT deny with smoothing=20 (score is at boundary)")
+	}
+
+	// 6 junk messages should tip over
+	entry.AddNegative(WeightJunkMessage)
+	rep = entry.GetReputation()
+	// (0-6)/(0+6+20) = -6/26 ≈ -0.231 → denied
+	if !entry.ShouldDeny() {
+		t.Errorf("6 junk messages should deny: reputation=%.4f", rep)
+	}
 }
