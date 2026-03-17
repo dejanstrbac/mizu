@@ -56,6 +56,24 @@ func TestCheckMXRecord(t *testing.T) {
 			expectValid: false,
 			expectError: false,
 		},
+		{
+			name:        "Second-level registry domain - nic.in (Indian government)",
+			domain:      "nic.in",
+			expectValid: true, // Has MX records, should NOT be rejected as bare TLD
+			expectError: false,
+		},
+		{
+			name:        "Second-level registry domain - co.uk",
+			domain:      "bbc.co.uk",
+			expectValid: true,
+			expectError: false,
+		},
+		{
+			name:        "Bare TLD should be rejected",
+			domain:      "com",
+			expectValid: false,
+			expectError: false,
+		},
 	}
 
 	for _, tt := range tests {

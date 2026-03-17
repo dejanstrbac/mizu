@@ -58,7 +58,7 @@ func CheckMXRecord(ctx context.Context, domain string, resolver *net.Resolver, t
 
 	// Validate domain structure using Public Suffix List
 	// This catches:
-	// - Domains without valid TLDs (e.g., "test", "foo")
+	// - Bare TLDs (e.g., "com", "org", "test")
 	// - Domains with invalid TLDs (e.g., "foo.internal", "foo.local")
 	// - Malformed domains
 	//
@@ -67,9 +67,11 @@ func CheckMXRecord(ctx context.Context, domain string, resolver *net.Resolver, t
 	// internet email (.local, .internal, .localhost, .invalid, .test, .onion)
 	publicSuffix, icann := publicsuffix.PublicSuffix(domain)
 
-	// Only reject if domain is a bare TLD
-	if publicSuffix == domain {
-		// Domain IS the public suffix (e.g., "com", "co.uk")
+	// Only reject single-label bare TLDs (e.g., "com", "org", "test")
+	// Do NOT reject second-level registry domains (e.g., "nic.in", "co.uk", "gov.uk")
+	// which ARE valid organizational domains that can send email.
+	if publicSuffix == domain && !strings.Contains(domain, ".") {
+		// Domain is a bare TLD without any dots (e.g., "com", "test")
 		// Can't send mail from a bare TLD - this is always invalid
 		return false, nil
 	}
