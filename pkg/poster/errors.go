@@ -52,6 +52,11 @@ func (e *HTTPStatusError) IsRecipientBlocked() bool {
 	return e.StatusCode == 403
 }
 
+// IsPayloadTooLarge returns true if the status code indicates message is too large (413)
+func (e *HTTPStatusError) IsPayloadTooLarge() bool {
+	return e.StatusCode == 413
+}
+
 // NewHTTPStatusError creates a new HTTPStatusError
 func NewHTTPStatusError(statusCode int, body string) *HTTPStatusError {
 	return &HTTPStatusError{

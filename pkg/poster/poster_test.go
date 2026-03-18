@@ -314,3 +314,43 @@ func TestPostEmailToDestinationWithContext_NoAPIKeyForCustomEndpoint(t *testing.
 		t.Errorf("Expected X-Trace-ID header")
 	}
 }
+
+func TestPostEmailToDestinationWithContext_PayloadTooLarge(t *testing.T) {
+	var requestCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		w.WriteHeader(http.StatusRequestEntityTooLarge) // 413
+		io.WriteString(w, `{"error": "Message too large - 41.23MB exceeds 25MB limit", "size": 43234234, "limit": 26214400}`)
+	}))
+	defer server.Close()
+
+	client := NewHTTPClient(30*time.Second, 0, 0, 0)
+	err := PostEmailToDestinationWithContext(context.Background(), "test email", server.URL, "api-key", 3, false, "", nil, "", "", nil, client, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if err == nil {
+		t.Fatal("Expected an error, but got nil")
+	}
+
+	var httpErr *HTTPStatusError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("Expected HTTPStatusError, but got: %T", err)
+	}
+
+	if httpErr.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("Expected status code 413, but got: %d", httpErr.StatusCode)
+	}
+
+	if !strings.Contains(httpErr.Body, "Message too large") {
+		t.Errorf("Expected error body to contain 'Message too large', but got: %s", httpErr.Body)
+	}
+
+	// 413 should NOT be retried (it's a permanent client error)
+	if atomic.LoadInt32(&requestCount) != 1 {
+		t.Errorf("Expected 1 request (no retries), but got: %d", requestCount)
+	}
+
+	// Verify it's not marked as retryable
+	if httpErr.IsRetryable() {
+		t.Error("Expected HTTP 413 to be non-retryable, but IsRetryable() returned true")
+	}
+}

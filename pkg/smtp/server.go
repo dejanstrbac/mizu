@@ -1633,6 +1633,15 @@ func (s *Session) deliverSynchronous(signedEmail string) error {
 		// Check if this is a recipient-specific error that should be cached
 		var httpErr *poster.HTTPStatusError
 		if errors.As(err, &httpErr) {
+			// Handle 413 Payload Too Large - convert to SMTP 552
+			if httpErr.IsPayloadTooLarge() {
+				return &smtp.SMTPError{
+					Code:         552,
+					EnhancedCode: smtp.EnhancedCode{5, 3, 4},
+					Message:      "Message size not accepted",
+				}
+			}
+
 			// Cache 404 responses (recipient not found)
 			if httpErr.IsRecipientNotFound() && s.distTracker != nil && s.distTracker.recipientCacheTTL > 0 && len(s.to) > 0 {
 				for _, recipient := range s.to {
