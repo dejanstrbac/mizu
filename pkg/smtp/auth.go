@@ -172,15 +172,17 @@ func (a *HTTPAuthenticator) AuthenticateWithIP(username, password, remoteIP stri
 	return true, nil
 }
 
-// verifyAgainstHashes tries to verify the password against a list of hashes
-// Returns true if any hash matches
+// verifyAgainstHashes tries to verify the password against a list of hashes.
+// Returns true if any hash matches. Always iterates all hashes to avoid
+// leaking which position matched via timing side-channel.
 func (a *HTTPAuthenticator) verifyAgainstHashes(hashes []string, password string) bool {
+	matched := false
 	for _, hash := range hashes {
-		if err := VerifyPassword(hash, password); err == nil {
-			return true
+		if VerifyPassword(hash, password) == nil {
+			matched = true
 		}
 	}
-	return false
+	return matched
 }
 
 // fetchCredentials fetches user credentials from the backend via GET request
