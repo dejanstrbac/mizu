@@ -1172,6 +1172,23 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	s.Logger.Info("RCPT TO", "to", to)
 
+	// Check max recipients limit
+	maxRecipients := s.serverConfig.MaxRecipientsPerMessage
+	if maxRecipients == 0 {
+		maxRecipients = 100 // Default if not set
+	}
+	if len(s.to) >= maxRecipients {
+		s.Logger.Warn("Rejecting RCPT TO - max recipients exceeded",
+			"to", to,
+			"current_count", len(s.to),
+			"max_recipients", maxRecipients)
+		return &smtp.SMTPError{
+			Code:         452,
+			EnhancedCode: smtp.EnhancedCode{4, 5, 3},
+			Message:      fmt.Sprintf("Too many recipients (maximum: %d)", maxRecipients),
+		}
+	}
+
 	s.commandState = stateRcpt
 
 	// Check rate limits now that we have TO information
