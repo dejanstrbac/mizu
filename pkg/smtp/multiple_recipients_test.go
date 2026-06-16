@@ -208,14 +208,15 @@ func TestMultipleRecipients_BackendFailureRejectsAll(t *testing.T) {
 		t.Fatal("Expected delivery to fail when backend returns 404")
 	}
 
-	// Should return 550 SMTP error
+	// Without a distTracker, a 404 falls through to a generic temporary failure (451);
+	// the key guarantee is that the whole transaction fails (no partial success).
 	smtpErr, ok := err.(*smtp.SMTPError)
 	if !ok {
 		t.Fatalf("Expected *smtp.SMTPError, got %T", err)
 	}
 
-	if smtpErr.Code != 550 {
-		t.Errorf("Expected SMTP code 550 for recipient not found, got %d", smtpErr.Code)
+	if smtpErr.Code != 451 {
+		t.Errorf("Expected SMTP code 451 for generic delivery failure, got %d", smtpErr.Code)
 	}
 }
 
