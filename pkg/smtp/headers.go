@@ -14,8 +14,9 @@ import (
 // InjectMizuHeaders adds Received and X-Mizu-* headers to the email
 // These headers provide email tracing, authentication results, and debugging information
 // If disableMizuHeaders is true, only the Received header is added (X-Mizu-* headers are skipped)
-// spamHeaders contains additional headers from spam checking (e.g., X-Junk: yes)
-func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID string, tlsVersion string, spfResult *validation.SPFResult, dmarcResult *validation.DMARCResult, arcResult *validation.ARCResult, isJunk bool, disableMizuHeaders bool, spamHeaders map[string]string) string {
+// spamHeaders contains additional headers from spam checking (e.g., X-Junk: yes); a key
+// may map to multiple values, which become separate header lines (e.g. Authentication-Results).
+func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID string, tlsVersion string, spfResult *validation.SPFResult, dmarcResult *validation.DMARCResult, arcResult *validation.ARCResult, isJunk bool, disableMizuHeaders bool, spamHeaders map[string][]string) string {
 	// Build the Received header (always added)
 	receivedHeader := buildReceivedHeader(domain, remoteAddr, heloHostname, traceID, tlsVersion)
 
@@ -25,15 +26,23 @@ func InjectMizuHeaders(rawEmail, domain, remoteAddr, heloHostname, traceID strin
 		mizuHeaders = buildMizuHeaders(traceID, spfResult, dmarcResult, arcResult, isJunk)
 	}
 
-	// Build spam check headers (from rspamd or other spam checkers)
+	// Build spam check headers (from rspamd or other spam checkers).
+	// Sanitize both name and value: although rspamd is internal, a stray CR/LF
+	// in either field would forge an arbitrary header or inject body content.
 	var spamHeaderStr string
 	if len(spamHeaders) > 0 {
 		var sb strings.Builder
-		for name, value := range spamHeaders {
-			sb.WriteString(name)
-			sb.WriteString(": ")
-			sb.WriteString(value)
-			sb.WriteString("\r\n")
+		for name, values := range spamHeaders {
+			safeName := sanitizeHeaderValue(name)
+			if safeName == "" {
+				continue
+			}
+			for _, value := range values {
+				sb.WriteString(safeName)
+				sb.WriteString(": ")
+				sb.WriteString(sanitizeHeaderValue(value))
+				sb.WriteString("\r\n")
+			}
 		}
 		spamHeaderStr = sb.String()
 	}
@@ -170,10 +179,17 @@ func buildAuthenticationSummary(spfResult *validation.SPFResult, dmarcResult *va
 	return strings.Join(parts, " ")
 }
 
-// addJunkHeader adds a custom header to mark the message as junk/spam
+// addJunkHeader adds a custom header to mark the message as junk/spam.
+// headerName comes from config (trusted), but we sanitize anyway for the
+// same defense-in-depth reason as the spam-check header path. A fully
+// stripped name would yield a malformed colon-only line, so skip in that
+// (practically unreachable) case.
 func addJunkHeader(rawEmail, headerName string) string {
-	header := fmt.Sprintf("%s: YES\r\n", headerName)
-	return header + rawEmail
+	safeName := sanitizeHeaderValue(headerName)
+	if safeName == "" {
+		return rawEmail
+	}
+	return fmt.Sprintf("%s: YES\r\n", safeName) + rawEmail
 }
 
 // modifySubject modifies the Subject header according to the provided pattern

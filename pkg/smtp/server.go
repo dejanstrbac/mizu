@@ -101,11 +101,11 @@ type SpamChecker interface {
 
 // SpamCheckResult represents the result of spam checking
 type SpamCheckResult struct {
-	IsSpam       bool              // True if message should be treated as spam
-	Action       string            // Rspamd action (e.g., "add header", "reject")
-	Score        float64           // Spam score
-	AddHeaders   map[string]string // Headers to add (from rspamd milter)
-	ShouldReject bool              // True if message should be rejected based on action
+	IsSpam       bool                // True if message should be treated as spam
+	Action       string              // Rspamd action (e.g., "add header", "reject")
+	Score        float64             // Spam score
+	AddHeaders   map[string][]string // Headers to add (from rspamd milter); each key may map to multiple values when rspamd asks for the same header more than once (e.g. Authentication-Results)
+	ShouldReject bool                // True if message should be rejected based on action
 }
 
 // Backend implements smtp.Backend interface for our custom SMTP server.
@@ -1607,7 +1607,7 @@ func (s *Session) deliverMessage(rawEmail string) error {
 	}
 
 	// Collect spam check headers
-	var spamHeaders map[string]string
+	var spamHeaders map[string][]string
 	if s.spamResult != nil && len(s.spamResult.AddHeaders) > 0 {
 		spamHeaders = s.spamResult.AddHeaders
 	}

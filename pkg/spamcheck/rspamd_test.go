@@ -39,8 +39,8 @@ func TestClient_Check_Spam(t *testing.T) {
 				"SPAM_RULE": {Score: 7.5},
 			},
 			Milter: &rspamdMilter{
-				AddHeaders: map[string]rspamdHeader{
-					"X-Spam": {Value: "Yes", Order: 0},
+				AddHeaders: map[string]rspamdHeaderList{
+					"X-Spam": {{Value: "Yes", Order: 0}},
 				},
 			},
 		}
@@ -85,8 +85,8 @@ func TestClient_Check_Spam(t *testing.T) {
 	}
 
 	// Verify headers
-	if result.AddHeaders["X-Spam"] != "Yes" {
-		t.Errorf("Expected X-Spam header with value 'Yes', got '%s'", result.AddHeaders["X-Spam"])
+	if got := result.AddHeaders["X-Spam"]; len(got) != 1 || got[0] != "Yes" {
+		t.Errorf("Expected X-Spam header with value [Yes], got %v", got)
 	}
 }
 
@@ -246,8 +246,8 @@ func TestAdapter_Check(t *testing.T) {
 			Score:         6.0,
 			RequiredScore: 5.0,
 			Milter: &rspamdMilter{
-				AddHeaders: map[string]rspamdHeader{
-					"X-Spam-Score": {Value: "6.0", Order: 0},
+				AddHeaders: map[string]rspamdHeaderList{
+					"X-Spam-Score": {{Value: "6.0", Order: 0}},
 				},
 			},
 		}
@@ -280,13 +280,13 @@ func TestAdapter_Check(t *testing.T) {
 	}
 
 	// Verify custom spam header was added
-	if result.AddHeaders["X-Junk"] != "yes" {
-		t.Errorf("Expected X-Junk header with value 'yes', got '%s'", result.AddHeaders["X-Junk"])
+	if got := result.AddHeaders["X-Junk"]; len(got) != 1 || got[0] != "yes" {
+		t.Errorf("Expected X-Junk header with value [yes], got %v", got)
 	}
 
 	// Verify rspamd milter headers are also present
-	if result.AddHeaders["X-Spam-Score"] != "6.0" {
-		t.Errorf("Expected X-Spam-Score header with value '6.0', got '%s'", result.AddHeaders["X-Spam-Score"])
+	if got := result.AddHeaders["X-Spam-Score"]; len(got) != 1 || got[0] != "6.0" {
+		t.Errorf("Expected X-Spam-Score header with value [6.0], got %v", got)
 	}
 }
 
@@ -394,11 +394,156 @@ func TestClient_Check_StringHeaders(t *testing.T) {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
 
-	if result.AddHeaders["X-Spam"] != "Yes" {
-		t.Errorf("Expected X-Spam header 'Yes', got %q", result.AddHeaders["X-Spam"])
+	if got := result.AddHeaders["X-Spam"]; len(got) != 1 || got[0] != "Yes" {
+		t.Errorf("Expected X-Spam header [Yes], got %v", got)
 	}
-	if result.AddHeaders["X-Spam-Score"] != "8.0" {
-		t.Errorf("Expected X-Spam-Score header '8.0', got %q", result.AddHeaders["X-Spam-Score"])
+	if got := result.AddHeaders["X-Spam-Score"]; len(got) != 1 || got[0] != "8.0" {
+		t.Errorf("Expected X-Spam-Score header [8.0], got %v", got)
+	}
+}
+
+func TestClient_Check_ArrayHeaders(t *testing.T) {
+	// Regression: rspamd returns an array of header entries when the same
+	// header name needs to be added more than once (e.g. multiple
+	// Authentication-Results lines for chained ARC instances). The decoder
+	// must accept that shape instead of failing with "cannot unmarshal array".
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"action": "no action",
+			"score": 0.0,
+			"required_score": 5.0,
+			"symbols": {},
+			"milter": {
+				"add_headers": {
+					"Authentication-Results": [
+						{"value": "mx.example.com; dkim=pass", "order": 0},
+						{"value": "mx.example.com; arc=pass", "order": 1}
+					],
+					"X-Mixed": ["one", "two"],
+					"X-Single": "solo"
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "", 5*time.Second, slog.Default())
+	result, err := client.Check(context.Background(), CheckRequest{
+		Message:  "Subject: Test\r\n\r\nBody",
+		ClientIP: "1.2.3.4",
+		From:     "sender@example.com",
+		Rcpt:     []string{"recipient@example.com"},
+		Helo:     "mail.example.com",
+	})
+
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	got := result.AddHeaders["Authentication-Results"]
+	if len(got) != 2 {
+		t.Fatalf("Expected 2 Authentication-Results values, got %d: %v", len(got), got)
+	}
+	// rspamd returns a map, so the order in which keys are visited isn't
+	// guaranteed — but each individual array preserves its ordering.
+	if got[0] != "mx.example.com; dkim=pass" || got[1] != "mx.example.com; arc=pass" {
+		t.Errorf("Unexpected Authentication-Results values: %v", got)
+	}
+
+	if got := result.AddHeaders["X-Mixed"]; len(got) != 2 || got[0] != "one" || got[1] != "two" {
+		t.Errorf("Expected X-Mixed=[one two], got %v", got)
+	}
+	if got := result.AddHeaders["X-Single"]; len(got) != 1 || got[0] != "solo" {
+		t.Errorf("Expected X-Single=[solo], got %v", got)
+	}
+}
+
+func TestClient_Check_ArrayHeaders_OrderRespected(t *testing.T) {
+	// Rspamd's protocol doesn't guarantee JSON array order matches the
+	// intended emission order — `order` is the authoritative field. Hand
+	// the decoder an array whose array index disagrees with `order` and
+	// verify we sort by `order`.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"action": "no action",
+			"score": 0.0,
+			"required_score": 5.0,
+			"symbols": {},
+			"milter": {
+				"add_headers": {
+					"Authentication-Results": [
+						{"value": "second", "order": 2},
+						{"value": "first",  "order": 1},
+						{"value": "third",  "order": 3}
+					]
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "", 5*time.Second, slog.Default())
+	result, err := client.Check(context.Background(), CheckRequest{
+		Message: "Subject: Test\r\n\r\nBody",
+		From:    "sender@example.com",
+		Rcpt:    []string{"recipient@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	got := result.AddHeaders["Authentication-Results"]
+	want := []string{"first", "second", "third"}
+	if len(got) != len(want) {
+		t.Fatalf("Expected %d values, got %d: %v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Position %d: expected %q, got %q (full: %v)", i, want[i], got[i], got)
+		}
+	}
+}
+
+func TestClient_Check_NullHeaderDropped(t *testing.T) {
+	// A `null` entry should not yield a `Name: \r\n` header — drop it.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{
+			"action": "no action",
+			"score": 0.0,
+			"required_score": 5.0,
+			"symbols": {},
+			"milter": {
+				"add_headers": {
+					"X-Dropped": null,
+					"X-Empty":   "",
+					"X-Kept":    "yes"
+				}
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "", 5*time.Second, slog.Default())
+	result, err := client.Check(context.Background(), CheckRequest{
+		Message: "Subject: Test\r\n\r\nBody",
+		From:    "sender@example.com",
+		Rcpt:    []string{"recipient@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+
+	if _, ok := result.AddHeaders["X-Dropped"]; ok {
+		t.Errorf("Expected X-Dropped to be omitted (null entry), got %v", result.AddHeaders["X-Dropped"])
+	}
+	if _, ok := result.AddHeaders["X-Empty"]; ok {
+		t.Errorf("Expected X-Empty to be omitted (empty value), got %v", result.AddHeaders["X-Empty"])
+	}
+	if got := result.AddHeaders["X-Kept"]; len(got) != 1 || got[0] != "yes" {
+		t.Errorf("Expected X-Kept=[yes], got %v", got)
 	}
 }
 

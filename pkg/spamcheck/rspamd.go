@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -27,12 +28,12 @@ type Client struct {
 
 // CheckResult contains the spam check result from rspamd
 type CheckResult struct {
-	Action        string             // Rspamd action: "reject", "add header", "rewrite subject", etc.
-	Score         float64            // Spam score
-	RequiredScore float64            // Threshold score for spam classification
-	IsSpam        bool               // True if action is "add header", "rewrite subject", or "reject"
-	AddHeaders    map[string]string  // Headers to add (from milter.add_headers)
-	Symbols       map[string]float64 // Triggered spam rules and their scores
+	Action        string              // Rspamd action: "reject", "add header", "rewrite subject", etc.
+	Score         float64             // Spam score
+	RequiredScore float64             // Threshold score for spam classification
+	IsSpam        bool                // True if action is "add header", "rewrite subject", or "reject"
+	AddHeaders    map[string][]string // Headers to add (from milter.add_headers); a key may have multiple values when rspamd asks for the same header to be added more than once (e.g. Authentication-Results)
+	Symbols       map[string]float64  // Triggered spam rules and their scores
 }
 
 // rspamdResponse represents the JSON response from rspamd HTTP protocol v2
@@ -53,11 +54,11 @@ type rspamdSymbol struct {
 
 // rspamdMilter contains headers and actions for modifying the message
 type rspamdMilter struct {
-	AddHeaders map[string]rspamdHeader `json:"add_headers,omitempty"`
+	AddHeaders map[string]rspamdHeaderList `json:"add_headers,omitempty"`
 }
 
-// rspamdHeader represents a header to add. Rspamd may return either
-// a string value or an object {"value": "...", "order": 0}.
+// rspamdHeader represents a single header entry to add. Rspamd may return
+// either a string value or an object {"value": "...", "order": 0}.
 type rspamdHeader struct {
 	Value string `json:"value"`
 	Order int    `json:"order"`
@@ -77,6 +78,37 @@ func (h *rspamdHeader) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*h = rspamdHeader(obj)
+	return nil
+}
+
+// rspamdHeaderList holds one or more header entries for a single header
+// name. Rspamd returns a string or object for a single value, or an array
+// of strings/objects when the same header should be added multiple times
+// (commonly seen with Authentication-Results when several ARC instances
+// or chained results are present).
+type rspamdHeaderList []rspamdHeader
+
+func (l *rspamdHeaderList) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimLeft(data, " \t\r\n")
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var arr []rspamdHeader
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*l = arr
+		return nil
+	}
+	var single rspamdHeader
+	if err := json.Unmarshal(data, &single); err != nil {
+		return err
+	}
+	// Treat `null` (or any payload that yields no value) as an empty list so
+	// callers don't emit a bodyless `Name: \r\n` header line.
+	if single.Value == "" {
+		*l = nil
+		return nil
+	}
+	*l = rspamdHeaderList{single}
 	return nil
 }
 
@@ -159,7 +191,7 @@ func (c *Client) Check(ctx context.Context, message, clientIP, from string, rcpt
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusGatewayTimeout && isStatisticsError(bodyBytes) {
 			c.Logger.Debug("Ignoring rspamd statistics error (autolearn failure)", "body", string(bodyBytes))
-			return &CheckResult{AddHeaders: map[string]string{}, Symbols: map[string]float64{}}, nil
+			return &CheckResult{AddHeaders: map[string][]string{}, Symbols: map[string]float64{}}, nil
 		}
 		return nil, fmt.Errorf("rspamd returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
@@ -175,7 +207,7 @@ func (c *Client) Check(ctx context.Context, message, clientIP, from string, rcpt
 		Action:        rspamdResp.Action,
 		Score:         rspamdResp.Score,
 		RequiredScore: rspamdResp.RequiredScore,
-		AddHeaders:    make(map[string]string),
+		AddHeaders:    make(map[string][]string),
 		Symbols:       make(map[string]float64),
 	}
 
@@ -183,10 +215,28 @@ func (c *Client) Check(ctx context.Context, message, clientIP, from string, rcpt
 	action := strings.ToLower(rspamdResp.Action)
 	result.IsSpam = action == "add header" || action == "rewrite subject" || action == "reject"
 
-	// Extract headers to add from milter section
+	// Extract headers to add from milter section. Rspamd uses `order` to
+	// disambiguate entries that share a header name (e.g. multiple
+	// Authentication-Results lines for chained ARC instances). JSON array
+	// order usually matches but isn't guaranteed by the protocol, so we
+	// sort explicitly. Empty values are skipped so we never emit a
+	// bodyless header line.
 	if rspamdResp.Milter != nil && rspamdResp.Milter.AddHeaders != nil {
-		for name, header := range rspamdResp.Milter.AddHeaders {
-			result.AddHeaders[name] = header.Value
+		for name, headers := range rspamdResp.Milter.AddHeaders {
+			ordered := append(rspamdHeaderList(nil), headers...)
+			sort.SliceStable(ordered, func(i, j int) bool {
+				return ordered[i].Order < ordered[j].Order
+			})
+			values := make([]string, 0, len(ordered))
+			for _, h := range ordered {
+				if h.Value == "" {
+					continue
+				}
+				values = append(values, h.Value)
+			}
+			if len(values) > 0 {
+				result.AddHeaders[name] = values
+			}
 		}
 	}
 

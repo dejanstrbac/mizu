@@ -2,6 +2,7 @@ package spamcheck
 
 import (
 	"context"
+	"maps"
 	"strings"
 
 	"migadu/mizu/pkg/smtp"
@@ -43,29 +44,26 @@ func (a *Adapter) Check(ctx context.Context, message, clientIP, from string, rcp
 		return smtp.SpamCheckResult{}, err
 	}
 
-	// Build adapter result
+	// Copy so we can add the configured spam/ham header without mutating
+	// the rspamd result.
 	adapterResult := smtp.SpamCheckResult{
 		IsSpam:     result.IsSpam,
 		Action:     result.Action,
 		Score:      result.Score,
-		AddHeaders: make(map[string]string),
+		AddHeaders: make(map[string][]string, len(result.AddHeaders)+1),
 	}
+	maps.Copy(adapterResult.AddHeaders, result.AddHeaders)
 
 	// Check if we should reject based on configured action
 	if a.rejectOnAction != "" && strings.EqualFold(result.Action, a.rejectOnAction) {
 		adapterResult.ShouldReject = true
 	}
 
-	// Copy headers from rspamd milter response
-	for name, value := range result.AddHeaders {
-		adapterResult.AddHeaders[name] = value
-	}
-
 	// Add configured spam/ham header based on result
 	if result.IsSpam && a.spamHeaderValue != "" {
-		adapterResult.AddHeaders[a.spamHeader] = a.spamHeaderValue
+		adapterResult.AddHeaders[a.spamHeader] = []string{a.spamHeaderValue}
 	} else if !result.IsSpam && a.hamHeaderValue != "" {
-		adapterResult.AddHeaders[a.spamHeader] = a.hamHeaderValue
+		adapterResult.AddHeaders[a.spamHeader] = []string{a.hamHeaderValue}
 	}
 
 	return adapterResult, nil

@@ -157,6 +157,47 @@ func TestInjectMizuHeaders_NoTLS(t *testing.T) {
 	}
 }
 
+func TestInjectMizuHeaders_SpamHeaderSanitization(t *testing.T) {
+	originalEmail := "From: sender@example.com\r\nSubject: Test\r\n\r\nBody\r\n"
+
+	// Both the header name and value carry CR/LF — a successful injection
+	// would either forge an arbitrary header or splice content into the
+	// body. Sanitization should strip the control characters and keep the
+	// remaining payload on a single header line.
+	spamHeaders := map[string][]string{
+		"X-Spam\r\nInjected-Name": {"value\r\nInjected-Value: yes"},
+	}
+
+	modifiedEmail := InjectMizuHeaders(
+		originalEmail,
+		"mail.example.com",
+		"1.2.3.4:5678",
+		"client.example.com",
+		"trace789",
+		"TLS 1.3",
+		nil, nil, nil,
+		false,
+		true, // disable mizu headers — focus the assertion on the spam path
+		spamHeaders,
+	)
+
+	// "Injected-Name"/"Injected-Value" must only appear as inline fragments
+	// of the surviving single header line — never as the start of a line.
+	for _, line := range strings.Split(modifiedEmail, "\r\n") {
+		if strings.HasPrefix(line, "Injected-Name") {
+			t.Errorf("Header name was injected as its own line: %q", line)
+		}
+		if strings.HasPrefix(line, "Injected-Value") {
+			t.Errorf("Header value was injected as its own line: %q", line)
+		}
+	}
+	// sanitizeHeaderValue *strips* control characters rather than replacing
+	// them with a separator, so the substrings concatenate directly.
+	if !strings.Contains(modifiedEmail, "X-SpamInjected-Name: valueInjected-Value: yes\r\n") {
+		t.Errorf("Expected sanitized single-line header, got:\n%s", modifiedEmail)
+	}
+}
+
 func TestBuildReceivedHeader(t *testing.T) {
 	header := buildReceivedHeader(
 		"mail.example.com",
